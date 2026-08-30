@@ -1,11 +1,11 @@
 # Unscroll V1 Design
 
-Date: 2026-08-30  
-Status: Approved in conversation; awaiting review of this written specification
+Date: 2026-08-30
+Status: Revised after design review; awaiting final approval
 
 ## Summary
 
-Unscroll is a fully free and open-source desktop application that helps people turn an ordinary Android phone into a quieter, deliberately limited device. A user connects a phone over USB, chooses the apps they want to keep, and applies a text-only launcher plus reversible Android restrictions. Blocked apps remain installed with their data intact, disappear from Unscroll Launcher, cannot launch normally, and stop sending notifications where the phone supports Android package suspension.
+Unscroll is a fully free and open-source desktop application that helps people turn an ordinary Android phone into a quieter, deliberately limited device. A user connects a phone over USB, chooses the apps they want to keep, and applies a text-only launcher plus reversible Android restrictions. Blocked apps remain installed with their data intact, disappear from Unscroll Launcher, cannot launch normally, and stop sending notifications where the phone passes Unscroll's package-suspension capability checks.
 
 V1 prioritizes broad compatibility and meaningful friction rather than tamper-proof enforcement. A determined user can escape through ADB, Android recovery, factory reset, or manufacturer-specific controls. Normal reversal requires reconnecting the phone to any compatible Unscroll desktop installation and typing an explicit confirmation phrase.
 
@@ -67,7 +67,7 @@ The Android application is a rebranded Olauncher fork with three Unscroll-specif
 
 - Render only the current allowlist as a text-only launcher. The launcher itself does not display app icons.
 - Build the primary-user app catalog and protected-package facts using Android platform APIs.
-- Store versioned policy, recovery, and transaction data in private storage and expose the minimum required data through an ADB-shell-only bridge.
+- Store a versioned recovery envelope in private storage and expose the minimum required data through an ADB-shell-only bridge.
 
 The fork removes Olauncher's on-phone hidden-app editor and any policy or restoration controls. It also removes features and permissions Unscroll does not need, including online wallpaper downloads, promotional links, usage statistics, Device Admin, and Accessibility Service integration. V1 keeps only the text home/app list, search, essential launcher behavior, and restrained appearance preferences. Policy writes remain available only through the ADB-shell bridge.
 
@@ -79,19 +79,28 @@ The bridge is a versioned Android `ContentProvider` protected for both reads and
 - **Blocked app:** a launchable primary-user app Unscroll successfully suspended and omitted from the launcher.
 - **Protected app:** a package Unscroll will never suspend because it owns a required system role or because safety cannot be established.
 - **Recovery baseline:** the immutable record of relevant state before Unscroll first applies a policy.
+- **Recovery envelope:** the baseline, active policy, maintenance state, and complete transaction journal required to reconcile or restore the phone.
 - **Transaction journal:** the append-only record of changes Unscroll applies initially or during later edits and maintenance.
 
 The following invariants always hold:
 
 1. Unscroll never uninstalls a user's existing app or deletes its data.
-2. Installing Unscroll Launcher without activating it is the only permitted bootstrap mutation before the baseline exists. If bridge or baseline preparation fails, Unscroll uninstalls that bootstrap copy. No existing package or setting is changed before a readable recovery baseline exists in launcher-private storage and at `/sdcard/Documents/Unscroll/recovery-v1.json`.
+2. Installing Unscroll Launcher without activating it is the only permitted bootstrap mutation before the baseline exists. If bridge or baseline preparation fails, Unscroll uninstalls that bootstrap copy. No existing package or setting is changed before a readable recovery envelope containing the baseline exists in launcher-private storage and at `/sdcard/Documents/Unscroll/recovery-v1.json`.
 3. The baseline remains immutable until a complete restore succeeds.
-4. Every mutation has a recorded inverse and is verified after execution.
-5. The previous launcher remains installed and is recorded before Unscroll becomes the default launcher.
+4. Before every mutation, both envelope copies record the pending operation and its inverse. After verification, both copies record it as applied before the next mutation begins.
+5. The baseline launcher remains installed and unsuspended for the entire policy lifetime, because it may provide recents, QuickStep, or gesture navigation. Unscroll records it before activation and hides it from Unscroll Launcher's app list.
 6. Unscroll Launcher becomes the default only after all other required operations succeed.
-7. The recovery record is removed only after every recorded change has been restored and verified.
+7. The recovery envelope is removed only after every recorded change has been restored and verified.
 8. A package is never blocked unless Unscroll identifies it as launchable, proves it is not protected, and verifies the resulting suspended state.
 9. Manifest contents are treated as untrusted input: device identity, schema, operation type, package identifiers, and setting values are validated before use. Manifests cannot contain arbitrary shell commands.
+
+## Recovery envelope
+
+The private and shared copies mirror the complete recovery envelope after every pending or applied operation, not only the original baseline. Each envelope contains a baseline ID, a monotonic revision, the previous revision's hash, and a checksum. The desktop shell writes the shared copy at `/sdcard/Documents/Unscroll/recovery-v1.json`; the launcher bridge owns the private copy.
+
+On reconnection, Unscroll validates both copies before trusting either. If one valid journal strictly extends the other, Unscroll uses it and repairs the stale copy. Forked histories, invalid checksums, mismatched baseline IDs, or device state that neither valid history explains stop automatic mutation; Unscroll never guesses.
+
+If launcher-private data is cleared, Unscroll Launcher defaults to an empty policy view rather than exposing an inferred app list. A fresh compatible desktop installation can rebuild the private copy from the valid shared envelope before offering edit, maintenance, or restore actions.
 
 ## Protected packages
 
@@ -103,7 +112,7 @@ Protection is role- and capability-based rather than a single manufacturer packa
 - Default dialer and emergency calling path.
 - Default SMS app where telephony is present.
 - Device provisioning and core account components when disabling them is unsafe.
-- Unscroll Launcher and the currently active launcher until the final switch.
+- Unscroll Launcher and the baseline launcher for the full policy lifetime.
 - Any package whose role or shared-package responsibilities cannot be classified safely.
 
 Known manufacturer facts may add protection but never override dynamic safety checks. Conservative protection is preferable to disabling an uncertain system component. The review screen explains protected entries and reports packages that cannot safely be blocked.
@@ -114,7 +123,9 @@ Known manufacturer facts may add protection but never override dynamic safety ch
 
 Unscroll finds exactly one USB-connected Android device. It shows separate guidance for no device, unauthorized debugging, multiple devices, missing Windows/OEM drivers, unsupported Android versions, and unsupported ADB capabilities.
 
-V1 supports Android 7 through Android 16 because the launcher base and package-suspension design target API 24 through API 36. Newer Android releases are shown as unverified until added to the compatibility suite. The interface states that support is best-effort across manufacturers.
+V1 targets capability-tested phones running Android 7 through Android 16 because the required shell suspension and home-selection commands exist across API 24 through API 36. Newer Android releases are shown as unverified until added to the compatibility suite. Android version alone never establishes compatibility; the device must pass the required probes.
+
+On MIUI and HyperOS, bootstrap guidance covers the `Install via USB` setting and actionable handling for `INSTALL_FAILED_USER_RESTRICTED` or `SecurityException` results. The interface warns that Xiaomi may require a Mi account, SIM, or network connection to enable the setting; Unscroll does not bypass those manufacturer requirements.
 
 ### 2. Inspect
 
@@ -127,7 +138,7 @@ Unscroll installs its signed launcher APK without setting it as the default. It 
 - Current package suspension and enabled states.
 - Relevant app-store packages, install-intent handlers, unknown-source app-op values, and other settings Unscroll may modify.
 
-If an active Unscroll policy already exists, the home screen offers Edit allowed apps, Store maintenance, or Restore phone instead of starting a new baseline.
+If an active Unscroll policy already exists, or launcher-private state can be recovered from the shared envelope, the home screen reconciles the two copies and offers Edit allowed apps, Store maintenance, or Restore phone instead of starting a new baseline.
 
 ### 3. Choose apps
 
@@ -141,7 +152,7 @@ The review screen separates:
 
 - Apps that will remain available.
 - Apps that will be suspended and hidden.
-- Protected apps that cannot be selected.
+- Protected apps that cannot be selected, including the hidden baseline launcher.
 - Stores and sideload sources Unscroll will restrict.
 - Unsupported or manufacturer-protected items that may remain usable.
 
@@ -152,18 +163,22 @@ The Apply action remains disabled until required preflight checks pass.
 Unscroll creates and verifies the recovery baseline, stores the intended policy, then applies operations in this order:
 
 1. Configure the launcher's allowlist.
-2. Suspend blocked apps using the supported package-manager shell command for that device.
-3. Suspend detected user-facing app stores where safe.
+2. Suspend blocked apps individually using the supported package-manager shell command for that device, verifying each package's actual state.
+3. Suspend detected user-facing app stores individually and verify each one.
 4. Revoke and record supported per-source unknown-install app-ops without disabling shared permission-controller infrastructure.
 5. Verify package, store, and setting state.
-6. Set Unscroll Launcher as the default home activity.
+6. Ask Android's package manager to set Unscroll Launcher as the default home activity and verify the resolved HOME activity. If the manufacturer ignores the shell command, guide the user through Android's launcher chooser and verify again.
 7. Verify the default launcher and show completion results.
 
-Each completed operation is added to the on-device journal. A required failure triggers inverse operations in reverse order. Unscroll refuses full setup if any detected user-facing app store cannot be suspended. Optional sideload restrictions that fail are reported as partial protection; Unscroll never labels a failed package or installation path as blocked.
+Before each operation, Unscroll mirrors its pending journal entry and inverse to both recovery-envelope copies. After the resulting state is verified, it marks the operation applied in both copies before continuing. A required failure triggers inverse operations in reverse order.
+
+If an ordinary selected-to-block app cannot be suspended and verified, Unscroll classifies it as `cannot fully block` and pauses before changing HOME. The paused result identifies the affected packages and offers only Continue with those apps available or Roll back. If any detected user-facing app store cannot be suspended and verified, setup is hard-gated and rolled back; V1 does not offer reduced store protection. Optional sideload restrictions that fail are reported as partial protection. Unscroll never labels a failed package or installation path as blocked.
+
+After successful setup, Unscroll guides the user to disable USB debugging and, optionally, Developer Options. The policy persists without ADB. Editing, maintenance, and restoration require the user to re-enable debugging and reconnect the phone.
 
 ### 6. Edit
 
-Any compatible Unscroll desktop installation can read the active policy and baseline from the phone. Editing changes the allowlist and applies only the required delta. The original baseline is not replaced. Later Unscroll-created changes are appended to the journal so a full restore can undo them too.
+Any compatible Unscroll desktop installation can read and reconcile the recovery envelope from the phone, including restoring a missing private copy from the valid shared copy. Editing changes the allowlist and applies only the required delta. The original baseline is not replaced. Later Unscroll-created changes are appended to the mirrored journal so a full restore can undo them too.
 
 ### 7. Restore
 
@@ -171,12 +186,12 @@ Restore shows the recorded changes and requires the user to type `RESTORE MY PHO
 
 1. Restores modified app-ops and settings.
 2. Unsuspends packages Unscroll suspended, including later apps recorded by maintenance or editing.
-3. Restores the previous default launcher.
+3. Restores the previous default launcher through the shell command and verifies the resolved HOME activity; if the manufacturer ignores the command, guides the user through Android's launcher chooser and verifies again.
 4. Verifies restored state.
-5. Removes Unscroll Launcher only after successful verification.
-6. Removes the recovery records last.
+5. Removes Unscroll Launcher and its private envelope copy only after successful verification.
+6. Removes the shared recovery envelope last.
 
-If any step fails, the recovery records and launcher remain so the operation can be retried. Factory reset and manual ADB remain external escape hatches.
+If restoration fails before cleanup, the recovery envelopes and launcher remain so the operation can be retried. If final cleanup alone fails, any remaining recovery data is retained for a safe retry. The flow explains how to re-enable USB debugging if it was disabled after setup. Factory reset and manual ADB remain external escape hatches.
 
 ## Store maintenance
 
@@ -188,7 +203,7 @@ The interface states clearly that the maintenance window can also permit new ins
 
 ## Disconnection and recovery
 
-The transaction runner treats the phone's actual state as authoritative. After reconnection it compares actual state with the baseline, intended plan, and journal. It offers only safe actions: resume the known plan, roll back verified completed operations, or export a diagnostic report. It does not guess when the records and device state cannot be reconciled.
+The transaction runner treats the phone's actual state as authoritative. After reconnection it validates and reconciles both envelope copies, then compares actual state with the baseline, intended plan, maintenance state, and complete journal. It offers only safe actions: resume the known plan, roll back verified completed operations, or export a diagnostic report. It does not guess when the records and device state cannot be reconciled.
 
 The shared recovery copy allows a new desktop installation to recover after launcher data loss or accidental launcher removal. If both on-device copies are missing, Unscroll reports that automatic restoration cannot be proven safe and gives manual ADB/factory-reset guidance without executing speculative changes.
 
@@ -199,13 +214,13 @@ Unscroll runs capability probes for:
 - Launcher APK installation and version compatibility.
 - Shell access to the recovery bridge.
 - Package suspension and unsuspension.
-- Default-home selection.
+- Default-home selection through the shell command or a verified guided launcher-chooser fallback.
 - App-op inspection and modification.
 - Store detection and safe restriction.
 
-The core setup does not begin unless installation, bridge access, package suspension, home selection, recovery storage, and suspension of every detected user-facing store all pass. Per-source sideload restrictions may be partial and are shown as such.
+The core setup does not begin unless installation, bridge access, shell support for package suspension, a viable home-selection path, recovery storage, and a safe suspension plan for every detected user-facing store all pass preflight. Actual per-package suspension is verified transactionally during Apply. Per-source sideload restrictions may be partial and are shown as such.
 
-V1 configures only the primary Android user. Work profiles, Private Space, Secure Folder, and secondary users are detected where possible and reported as outside the policy. Marketing language uses "most phones running Android 7–16" until real-device evidence justifies a broader claim.
+V1 configures only the primary Android user. Work profiles, Private Space, Secure Folder, and secondary users are detected where possible and reported as outside the policy. Marketing language uses "capability-tested Android 7-16 phones" and does not imply that Android version alone guarantees support.
 
 ## Security and privacy
 
@@ -214,7 +229,7 @@ V1 configures only the primary Android user. Work profiles, Private Space, Secur
 - Tauri capabilities expose only the commands required by the UI.
 - ADB subprocess arguments use validated structured values; package identifiers never become arbitrary shell fragments.
 - The recovery bridge is unavailable to ordinary phone apps.
-- Recovery files use a versioned schema, device binding, strict operation allowlist, and corruption checksum.
+- Recovery envelopes use a versioned schema, device binding, baseline ID, monotonic revision, previous-revision hash, strict operation allowlist, and corruption checksum.
 - Release artifacts pin and checksum ADB and launcher resources.
 - The launcher APK uses a stable release signing identity. Compatibility checks prevent an incompatible desktop release from overwriting it.
 - Diagnostic export is explicit and previews included device/package metadata before saving.
@@ -230,6 +245,7 @@ Unscroll uses a calm, accessible, functional visual system rather than a dashboa
 - Visible labels, keyboard navigation, logical focus order, screen-reader announcements, and no color-only status.
 - Reduced-motion support and no decorative continuous animation.
 - Confirmation for policy application, maintenance, and restoration.
+- A post-setup security step recommends disabling USB debugging and Developer Options, with a universal warning that leaving debugging enabled can conflict with the security expectations of banking, government, workplace, or other sensitive apps.
 - No streaks, scores, guilt language, glassmorphism, excessive shadows, emoji icons, or digital-detox clichés.
 
 The desktop app-selection list uses real icons extracted from the phone. Unscroll Launcher remains text-only by design.
@@ -250,7 +266,7 @@ Public release installers and executables are Authenticode-signed. As a FOSS pro
 - The transaction runner is tested against a fake ADB adapter for success, optional failure, required failure, disconnect, resume, rollback, and inconsistent-state cases.
 - Svelte tests cover wizard state, filters, confirmations, keyboard navigation, focus, live announcements, and error recovery.
 - Android tests cover allowlist filtering, protected-package facts, bridge permissions, baseline immutability, schema compatibility, journal updates, and icon streaming.
-- Emulator integration covers representative supported API levels: Android 7, 10, 13, and Android 16/API 36.
+- Emulator integration covers API 24, 28, 29, 33, and 36.
 
 ### Real-device and release checks
 
@@ -263,12 +279,15 @@ A clean Windows 10/11 x64 machine without development tools must pass this accep
 3. Connect one supported phone and display real apps and icons.
 4. Apply an allowlist without deleting app data.
 5. Verify a blocked app is absent from Unscroll Launcher, cannot launch normally, and is suspended so its notifications are suppressed by Android.
-6. Interrupt an apply operation and recover safely after reconnection.
-7. Edit the allowlist from a separate compatible Unscroll installation.
-8. Run store maintenance and re-block a newly installed unapproved app.
-9. Restore the original state from the separate installation.
-10. Confirm the flow remains usable by keyboard and a Windows screen reader.
-11. Repeat the functional flow with networking disabled.
+6. Verify the baseline launcher remains unsuspended and hidden while recents and gesture navigation continue to work.
+7. Exercise both the shell HOME path and the guided launcher-chooser fallback.
+8. Interrupt an apply operation and recover safely after reconnection.
+9. Apply, edit, clear Unscroll Launcher data, and restore from a fresh desktop installation using the shared journal.
+10. Run store maintenance and re-block a newly installed unapproved app.
+11. Disable Developer Options, verify the policy persists, then re-enable debugging and restore the original state.
+12. Verify MIUI/HyperOS bootstrap errors produce the documented actionable guidance.
+13. Confirm the flow remains usable by keyboard and a Windows screen reader.
+14. Repeat the functional flow with networking disabled.
 
 ## Principal implementation risks
 
