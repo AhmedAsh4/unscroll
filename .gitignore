@@ -1,1 +1,12 @@
 .superpowers/
+node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+launcher/.gradle/
+launcher/build/
+launcher/app/build/
+*.jks
+*.keystore
+local.properties
+*.device-report.json

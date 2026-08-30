@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --prefix desktop
+      - run: npm run check --prefix desktop
+      - run: npm run build --prefix desktop
+      - run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --locked
+      - run: git diff --exit-code -- desktop/package-lock.json desktop/src-tauri/Cargo.lock launcher/settings-gradle.lockfile launcher/app/gradle.lockfile
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - run: chmod +x launcher/gradlew
+      - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        working-directory: launcher
+      - run: test -f LICENSE && test -f THIRD_PARTY_NOTICES.md && test -f launcher/LICENSE && test -f launcher/UPSTREAM.md
+      - run: git diff --exit-code -- desktop/package-lock.json desktop/src-tauri/Cargo.lock launcher/settings-gradle.lockfile launcher/app/gradle.lockfile
