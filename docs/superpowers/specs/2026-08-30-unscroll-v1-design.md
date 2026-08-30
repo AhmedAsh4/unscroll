@@ -1,7 +1,7 @@
 # Unscroll V1 Design
 
 Date: 2026-08-30
-Status: Revised after design review; awaiting final approval
+Status: Approved for implementation
 
 ## Summary
 
