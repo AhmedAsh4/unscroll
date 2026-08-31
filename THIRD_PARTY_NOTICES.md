@@ -7,3 +7,13 @@
 ## Desktop dependencies
 
 The desktop scaffold uses Tauri (MIT or Apache-2.0), Svelte (MIT), Vite (MIT), and TypeScript (Apache-2.0). Exact resolved versions are recorded in the committed npm and Cargo lockfiles. Their license notices remain available in their published packages and source distributions.
+
+## Android Debug Bridge
+
+Release preparation obtains the unmodified `adb.exe`, `AdbWinApi.dll`, and
+`AdbWinUsbApi.dll` subset from Google's official Android SDK Platform-Tools
+37.0.1 Windows archive. These AOSP components and their bundled dependencies are
+distributed under the open-source terms retained verbatim in
+[`third_party/adb/LICENSE`](third_party/adb/LICENSE). Exact provenance, hashes,
+and the redistribution decision are recorded in
+[`docs/compatibility/adb-distribution-decision.md`](docs/compatibility/adb-distribution-decision.md).

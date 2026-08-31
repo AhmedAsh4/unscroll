@@ -10,3 +10,4 @@ launcher/app/build/
 *.keystore
 local.properties
 *.device-report.json
+desktop/src-tauri/resources/adb/
