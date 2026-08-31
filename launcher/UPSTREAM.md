@@ -17,3 +17,9 @@
 2. Verify the checked-out commit hash before copying files.
 3. Replace this snapshot without a nested `.git` directory while retaining upstream licenses, notices, and this provenance record.
 4. Update this file with the repository URL, commit, date, and any local changes, then regenerate and review the Gradle lockfiles.
+
+## Local Task 4 changes
+
+- Rebranded the visible application as Unscroll Launcher and replaced the launcher icon.
+- Moved maintained launcher code to `org.unscroll.launcher` and reduced it to text home/app lists, search, app launching, shortcut pin acknowledgement, and a local text-size preference.
+- Removed the imported hidden-app editor, policy controls, usage statistics, online wallpaper and promotional features, Accessibility Service, Device Admin, and their permissions/components. No Unscroll policy store or bridge is present at this stage.
