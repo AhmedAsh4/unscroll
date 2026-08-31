@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unscroll.org/contracts/recovery-v1.schema.json",
+  "title": "Unscroll Recovery Envelope V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "device_binding", "baseline_id", "revision", "previous_revision_hash", "checksum", "baseline", "active_policy", "maintenance", "journal"],
+  "properties": {
+    "schema_version": {"const": "recovery-v1"},
+    "device_binding": {"$ref": "#/$defs/deviceBinding"},
+    "baseline_id": {"$ref": "#/$defs/id"},
+    "revision": {"type": "integer", "minimum": 0, "maximum": 1024, "description": "Semantic validation requires journal entry count plus applied entry count, so each pending write and each pending-to-applied transition has exactly one revision."},
+    "previous_revision_hash": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]},
+    "checksum": {"$ref": "#/$defs/hash"},
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "active_policy": {"$ref": "#/$defs/policy"},
+    "maintenance": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"enum": ["closed", "open"]}}},
+    "journal": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/journalEntry"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "package": {"type": "string", "maxLength": 255, "pattern": "^[A-Za-z_][A-Za-z0-9_$]*(\\.[A-Za-z_][A-Za-z0-9_$]*)+$"},
+    "deviceBinding": {"type": "object", "additionalProperties": false, "required": ["serial", "fingerprint", "user_id"], "properties": {"serial": {"type": "string", "minLength": 1, "maxLength": 512}, "fingerprint": {"type": "string", "minLength": 1, "maxLength": 512}, "user_id": {"type": "integer", "minimum": 0, "maximum": 999999}}},
+    "packageRecord": {"type": "object", "additionalProperties": false, "required": ["package_id", "suspended", "user_id"], "properties": {"package_id": {"$ref": "#/$defs/package"}, "suspended": {"type": "boolean"}, "user_id": {"type": "integer", "minimum": 0, "maximum": 999999}}},
+    "baseline": {"type": "object", "additionalProperties": false, "required": ["baseline_id", "baseline_launcher_package", "initial_home_component", "initial_packages"], "properties": {"baseline_id": {"$ref": "#/$defs/id"}, "baseline_launcher_package": {"$ref": "#/$defs/package"}, "initial_home_component": {"type": "string", "maxLength": 512, "pattern": "^[A-Za-z_][A-Za-z0-9_$.]*(\\.[A-Za-z_][A-Za-z0-9_$.]*)*/[.A-Za-z0-9_$]+$"}, "initial_packages": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/packageRecord"}}}},
+    "policy": {"type": "object", "additionalProperties": false, "required": ["allowed_packages", "baseline_launcher_package"], "properties": {"allowed_packages": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/package"}}, "baseline_launcher_package": {"$ref": "#/$defs/package"}}},
+    "operation": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["kind", "allowed_packages"], "properties": {"kind": {"const": "launcher_policy"}, "allowed_packages": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/package"}}}},
+      {"type": "object", "additionalProperties": false, "required": ["kind", "package_id", "suspended", "user_id"], "properties": {"kind": {"const": "package_suspension"}, "package_id": {"$ref": "#/$defs/package"}, "suspended": {"type": "boolean"}, "user_id": {"type": "integer", "minimum": 0, "maximum": 999999}}},
+      {"type": "object", "additionalProperties": false, "required": ["kind", "package_id", "user_id", "op", "mode"], "properties": {"kind": {"const": "app_op"}, "package_id": {"$ref": "#/$defs/package"}, "user_id": {"type": "integer", "minimum": 0, "maximum": 999999}, "op": {"type": "string", "minLength": 1, "maxLength": 512}, "mode": {"type": "string", "minLength": 1, "maxLength": 512}}},
+      {"type": "object", "additionalProperties": false, "required": ["kind", "component"], "properties": {"kind": {"const": "home"}, "component": {"type": "string", "minLength": 1, "maxLength": 512}}},
+      {"type": "object", "additionalProperties": false, "required": ["kind", "open"], "properties": {"kind": {"const": "maintenance"}, "open": {"type": "boolean"}}},
+      {"type": "object", "additionalProperties": false, "required": ["kind", "target", "removed"], "properties": {"kind": {"const": "cleanup"}, "target": {"enum": ["private_envelope", "shared_envelope"]}, "removed": {"type": "boolean"}}}
+    ]},
+    "journalEntry": {"type": "object", "additionalProperties": false, "required": ["id", "state", "operation", "inverse"], "properties": {"id": {"$ref": "#/$defs/id"}, "state": {"enum": ["pending", "applied"]}, "operation": {"$ref": "#/$defs/operation"}, "inverse": {"$ref": "#/$defs/operation"}}, "description": "Semantic validation requires an operation-specific inverse with matching target identity and an exact opposite prior value; state may only transition pending to applied."}
+  }
+}

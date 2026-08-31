@@ -61,7 +61,7 @@ Each task is an independent review gate. Its implementation agent must first add
 
 - [x] Task 1: Bootstrap the licensed monorepo and pin Olauncher.
 - [x] Task 2: Resolve and pin the Windows ADB distribution.
-- [ ] Task 3: Define the recovery and bridge contracts.
+- [x] Task 3: Define the recovery and bridge contracts.
 - [ ] Task 4: Rebrand and reduce the Olauncher fork.
 - [ ] Task 5: Add private recovery storage and policy-controlled launcher filtering.
 - [ ] Task 6: Expose the protected ADB-shell bridge, catalog, roles, and icons.
