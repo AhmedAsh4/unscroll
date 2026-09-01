@@ -14,7 +14,7 @@ class PrivateEnvelopeStore(
 
     fun read(): RecoveryEnvelopeV1? = try {
         val envelope = envelopeFile.takeIf(File::isFile)?.readText()?.let(RecoveryEnvelopeV1::parse) ?: return null
-        if (expectedBinding == envelope.deviceBinding) envelope else null
+        if (expectedBinding == null || expectedBinding == envelope.deviceBinding) envelope else null
     } catch (_: Exception) {
         null
     }
@@ -22,7 +22,7 @@ class PrivateEnvelopeStore(
     @Throws(IOException::class)
     fun write(envelope: RecoveryEnvelopeV1) {
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("cannot create private recovery storage")
-        if (expectedBinding != envelope.deviceBinding) throw IOException("unexpected recovery device binding")
+        if (expectedBinding != null && expectedBinding != envelope.deviceBinding) throw IOException("unexpected recovery device binding")
         if ((read()?.revision ?: Long.MIN_VALUE) > envelope.revision) {
             throw IOException("stale private recovery envelope")
         }
