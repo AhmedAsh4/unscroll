@@ -3,6 +3,7 @@ package org.unscroll.launcher
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import org.unscroll.launcher.bridge.UnscrollProvider
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -15,6 +16,16 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ManifestCapabilitiesTest {
+    @Test
+    fun bridgeIsExportedOnlyThroughDumpPermission() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val provider = context.packageManager.resolveContentProvider("org.unscroll.launcher.bridge", 0)
+
+        assertEquals(UnscrollProvider::class.java.name, provider?.name)
+        assertEquals("android.permission.DUMP", provider?.readPermission)
+        assertEquals("android.permission.DUMP", provider?.writePermission)
+    }
+
     @Test
     fun manifestOmitsRestrictedCapabilities() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

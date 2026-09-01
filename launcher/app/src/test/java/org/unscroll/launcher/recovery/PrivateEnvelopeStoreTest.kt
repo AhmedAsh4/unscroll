@@ -90,4 +90,30 @@ class PrivateEnvelopeStoreTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun `write if extends never replaces corrupt or foreign bound recovery files`() {
+        val directory = Files.createTempDirectory("envelope-store").toFile()
+        try {
+            val envelope = RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json"))
+            val file = File(directory, "recovery-v1.json")
+            listOf(
+                "not json",
+                fixture("valid/new-baseline.json").replace("ABC123", "OTHER").let { altered ->
+                    val unchecked = RecoveryEnvelopeV1.parseUncheckedChecksum(altered)
+                    altered.replace(unchecked.checksum, unchecked.computedChecksum())
+                },
+            ).forEach { unreadable ->
+                file.writeText(unreadable)
+                try {
+                    store(directory, envelope.deviceBinding).writeIfExtends(envelope)
+                    fail("existing unreadable recovery file must block bootstrap")
+                } catch (_: IOException) {
+                }
+                assertEquals(unreadable, file.readText())
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
 }

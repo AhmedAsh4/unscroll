@@ -12,18 +12,29 @@ class PrivateEnvelopeStore(
     private val envelopeFile = File(directory, FILE_NAME)
     private val temporaryFile = File(directory, "$FILE_NAME.tmp")
 
-    fun read(): RecoveryEnvelopeV1? = try {
-        val envelope = envelopeFile.takeIf(File::isFile)?.readText()?.let(RecoveryEnvelopeV1::parse) ?: return null
-        if (expectedBinding == null || expectedBinding == envelope.deviceBinding) envelope else null
-    } catch (_: Exception) {
-        null
+    fun read(): RecoveryEnvelopeV1? = synchronized(LOCK) { readUnsafe() }
+    private fun readUnsafe(): RecoveryEnvelopeV1? = (stateUnsafe() as? ReadState.Valid)?.envelope
+    private fun stateUnsafe(): ReadState {
+        if (!envelopeFile.exists()) return ReadState.Missing
+        if (!envelopeFile.isFile) return ReadState.Unreadable
+        val envelope = try { RecoveryEnvelopeV1.parse(envelopeFile.readText()) } catch (_: Exception) { return ReadState.Unreadable }
+        return if (expectedBinding == null || expectedBinding == envelope.deviceBinding) ReadState.Valid(envelope) else ReadState.Unreadable
     }
 
     @Throws(IOException::class)
-    fun write(envelope: RecoveryEnvelopeV1) {
+    fun write(envelope: RecoveryEnvelopeV1) = synchronized(LOCK) { writeUnsafe(envelope) }
+    fun writeIfExtends(envelope: RecoveryEnvelopeV1) = synchronized(LOCK) {
+        when (val current = stateUnsafe()) {
+            is ReadState.Valid -> current.envelope.requireStrictPrefixOf(envelope)
+            ReadState.Missing -> Unit
+            ReadState.Unreadable -> throw IOException("unreadable private recovery envelope")
+        }
+        writeUnsafe(envelope)
+    }
+    private fun writeUnsafe(envelope: RecoveryEnvelopeV1) {
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("cannot create private recovery storage")
         if (expectedBinding != null && expectedBinding != envelope.deviceBinding) throw IOException("unexpected recovery device binding")
-        if ((read()?.revision ?: Long.MIN_VALUE) > envelope.revision) {
+        if ((readUnsafe()?.revision ?: Long.MIN_VALUE) > envelope.revision) {
             throw IOException("stale private recovery envelope")
         }
         try {
@@ -45,5 +56,12 @@ class PrivateEnvelopeStore(
 
     private companion object {
         const val FILE_NAME = "recovery-v1.json"
+        val LOCK = Any()
+    }
+
+    private sealed class ReadState {
+        data class Valid(val envelope: RecoveryEnvelopeV1) : ReadState()
+        object Missing : ReadState()
+        object Unreadable : ReadState()
     }
 }
