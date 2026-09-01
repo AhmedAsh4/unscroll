@@ -9,6 +9,8 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class PrivateEnvelopeStoreTest {
+    private fun store(directory: File, binding: RecoveryDeviceBinding) = PrivateEnvelopeStore(directory, binding)
+
     private fun fixture(name: String): String {
         var directory = File(System.getProperty("user.dir") ?: error("missing user directory"))
         repeat(6) {
@@ -24,7 +26,7 @@ class PrivateEnvelopeStoreTest {
         val directory = Files.createTempDirectory("envelope-store").toFile()
         try {
             val envelope = RecoveryEnvelopeV1.parse(fixture("valid/applied-mutation.json"))
-            val store = PrivateEnvelopeStore(directory)
+            val store = store(directory, envelope.deviceBinding)
 
             store.write(envelope)
 
@@ -40,8 +42,8 @@ class PrivateEnvelopeStoreTest {
         try {
             val previous = RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json"))
             val replacement = RecoveryEnvelopeV1.parse(fixture("valid/applied-mutation.json"))
-            PrivateEnvelopeStore(directory).write(previous)
-            val interrupted = PrivateEnvelopeStore(directory, beforeCommit = { throw IOException("interrupted") })
+            PrivateEnvelopeStore(directory, previous.deviceBinding).write(previous)
+            val interrupted = PrivateEnvelopeStore(directory, previous.deviceBinding, beforeCommit = { throw IOException("interrupted") })
 
             try {
                 interrupted.write(replacement)
@@ -49,7 +51,7 @@ class PrivateEnvelopeStoreTest {
             } catch (_: IOException) {
             }
 
-            assertEquals(previous.canonicalJson(), PrivateEnvelopeStore(directory).read()?.canonicalJson())
+            assertEquals(previous.canonicalJson(), PrivateEnvelopeStore(directory, previous.deviceBinding).read()?.canonicalJson())
         } finally {
             directory.deleteRecursively()
         }
@@ -59,7 +61,7 @@ class PrivateEnvelopeStoreTest {
     fun `missing corrupt and cleared files have no envelope`() {
         val directory = Files.createTempDirectory("envelope-store").toFile()
         try {
-            val store = PrivateEnvelopeStore(directory)
+            val store = PrivateEnvelopeStore(directory, RecoveryEnvelopeV1.parse(fixture("valid/applied-mutation.json")).deviceBinding)
             assertNull(store.read())
 
             File(directory, "recovery-v1.json").writeText("not json")
@@ -73,14 +75,17 @@ class PrivateEnvelopeStoreTest {
     }
 
     @Test
-    fun `rejects an envelope whose retained device binding does not match`() {
+    fun `rejects an envelope bound to another device`() {
         val directory = Files.createTempDirectory("envelope-store").toFile()
         try {
-            val store = PrivateEnvelopeStore(directory)
-            store.write(RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json")))
-            File(directory, "recovery-v1.binding").writeText("OTHER\ngoogle/pixel/test\n0")
+            val envelope = RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json"))
+            val store = PrivateEnvelopeStore(directory, envelope.deviceBinding)
+            store.write(envelope)
+            val altered = fixture("valid/new-baseline.json").replace("ABC123", "OTHER")
+            val unchecked = RecoveryEnvelopeV1.parseUncheckedChecksum(altered)
+            File(directory, "recovery-v1.json").writeText(altered.replace(unchecked.checksum, unchecked.computedChecksum()))
 
-            assertNull(store.read())
+            assertNull(PrivateEnvelopeStore(directory, envelope.deviceBinding).read())
         } finally {
             directory.deleteRecursively()
         }
