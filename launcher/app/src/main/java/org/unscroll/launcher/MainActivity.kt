@@ -3,6 +3,9 @@ package org.unscroll.launcher
 import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
+import android.provider.Settings
+import android.provider.Telephony
+import android.telecom.TelecomManager
 import android.content.ActivityNotFoundException
 import android.os.Bundle
 import android.view.Gravity
@@ -130,7 +133,15 @@ class MainActivity : AppCompatActivity() {
         entries,
         policyStore.current(),
         packageName,
-        emptySet(),
+        protectedPackages(),
+    )
+
+    private fun protectedPackages(): Set<String> = PolicyFilter.protectedPackages(
+        packageName,
+        runCatching { packageManager.resolveActivity(Intent(Settings.ACTION_SETTINGS), 0)?.activityInfo?.packageName }.getOrNull(),
+        runCatching { Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/') }.getOrNull(),
+        runCatching { getSystemService(TelecomManager::class.java)?.defaultDialerPackage }.getOrNull(),
+        runCatching { Telephony.Sms.getDefaultSmsPackage(this) }.getOrNull(),
     )
 
     private fun textSize(): Float = prefs.getFloat("text_size", 20f)

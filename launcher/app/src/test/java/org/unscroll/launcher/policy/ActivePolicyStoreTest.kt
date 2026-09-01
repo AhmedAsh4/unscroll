@@ -48,6 +48,7 @@ class ActivePolicyStoreTest {
             policies.current()
             store.write(RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json")))
             assertEquals(RecoveryNeeded, policies.current())
+            assertEquals(RecoveryNeeded, ActivePolicyStore(PrivateEnvelopeStore(directory)).current())
 
             store.clear()
             assertTrue(policies.current() is RecoveryNeeded)

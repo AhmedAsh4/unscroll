@@ -3,6 +3,8 @@ package org.unscroll.launcher.policy
 import org.unscroll.launcher.catalog.LauncherEntry
 
 object PolicyFilter {
+    fun protectedPackages(vararg packages: String?): Set<String> = packages.filterNotNull().toSet()
+
     fun filter(
         entries: List<LauncherEntry>,
         state: LauncherPolicyState,

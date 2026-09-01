@@ -6,6 +6,7 @@ import java.util.TreeMap
 
 enum class ValidationError { SYNTAX, SCHEMA, FIELD, OPERATION, CHECKSUM, HISTORY, BASELINE, DEVICE_BINDING }
 class RecoveryValidationException(val classification: ValidationError) : IllegalArgumentException(classification.name)
+data class RecoveryDeviceBinding(val serial: String, val fingerprint: String, val userId: Long)
 
 private const val MAX_INPUT = 65_536
 private const val MAX_ITEMS = 512
@@ -35,6 +36,16 @@ class RecoveryEnvelopeV1 private constructor(private val value: Json) {
             validate()
             val baseline = obj(part("baseline") ?: fail(ValidationError.BASELINE), ValidationError.BASELINE)
             return text(baseline["baseline_launcher_package"] ?: fail(ValidationError.BASELINE), ValidationError.BASELINE)
+        }
+    val deviceBinding: RecoveryDeviceBinding
+        get() {
+            validate()
+            val binding = obj(part("device_binding") ?: fail(ValidationError.DEVICE_BINDING), ValidationError.DEVICE_BINDING)
+            return RecoveryDeviceBinding(
+                text(binding["serial"] ?: fail(ValidationError.DEVICE_BINDING), ValidationError.DEVICE_BINDING),
+                text(binding["fingerprint"] ?: fail(ValidationError.DEVICE_BINDING), ValidationError.DEVICE_BINDING),
+                number(binding["user_id"] ?: fail(ValidationError.DEVICE_BINDING)),
+            )
         }
     val revision: Long get() { validate(); return numberAt("revision") ?: fail(ValidationError.FIELD) }
 

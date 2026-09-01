@@ -10,9 +10,17 @@ class PrivateEnvelopeStore(
 ) {
     private val envelopeFile = File(directory, FILE_NAME)
     private val temporaryFile = File(directory, "$FILE_NAME.tmp")
+    private val bindingFile = File(directory, BINDING_FILE_NAME)
+    private val revisionFile = File(directory, REVISION_FILE_NAME)
 
     fun read(): RecoveryEnvelopeV1? = try {
-        envelopeFile.takeIf(File::isFile)?.readText()?.let(RecoveryEnvelopeV1::parse)
+        val envelope = envelopeFile.takeIf(File::isFile)?.readText()?.let(RecoveryEnvelopeV1::parse) ?: return null
+        val binding = bindingFile.takeIf(File::isFile)?.readLines()?.takeIf { it.size == 3 } ?: return null
+        val revision = revisionFile.takeIf(File::isFile)?.readText()?.toLongOrNull() ?: return null
+        if (
+            binding != listOf(envelope.deviceBinding.serial, envelope.deviceBinding.fingerprint, envelope.deviceBinding.userId.toString()) ||
+            envelope.revision < revision
+        ) null else envelope
     } catch (_: Exception) {
         null
     }
@@ -27,6 +35,8 @@ class PrivateEnvelopeStore(
             }
             beforeCommit()
             if (!temporaryFile.renameTo(envelopeFile)) throw IOException("cannot replace private recovery envelope")
+            bindingFile.writeText("${envelope.deviceBinding.serial}\n${envelope.deviceBinding.fingerprint}\n${envelope.deviceBinding.userId}")
+            revisionFile.writeText(maxOf(revisionFile.takeIf(File::isFile)?.readText()?.toLongOrNull() ?: envelope.revision, envelope.revision).toString())
         } finally {
             temporaryFile.delete()
         }
@@ -35,9 +45,13 @@ class PrivateEnvelopeStore(
     fun clear() {
         envelopeFile.delete()
         temporaryFile.delete()
+        bindingFile.delete()
+        revisionFile.delete()
     }
 
     private companion object {
         const val FILE_NAME = "recovery-v1.json"
+        const val BINDING_FILE_NAME = "recovery-v1.binding"
+        const val REVISION_FILE_NAME = "recovery-v1.revision"
     }
 }

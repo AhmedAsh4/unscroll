@@ -30,6 +30,16 @@ class PolicyFilterTest {
     }
 
     @Test
+    fun `combines resolved protected package facts before filtering`() {
+        val protected = PolicyFilter.protectedPackages("com.android.settings", null, "com.phone")
+
+        assertEquals(
+            emptyList<LauncherEntry>(),
+            PolicyFilter.filter(entries, policy, "org.unscroll.launcher", protected),
+        )
+    }
+
+    @Test
     fun `never infers removed or newly installed apps from the allowlist`() {
         val removed = PolicyFilter.filter(entries.filterNot { it.packageName == "com.phone" }, policy, "org.unscroll.launcher", emptySet())
         val newlyInstalled = PolicyFilter.filter(

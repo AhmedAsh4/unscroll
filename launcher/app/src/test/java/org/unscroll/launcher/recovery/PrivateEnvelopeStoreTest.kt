@@ -71,4 +71,18 @@ class PrivateEnvelopeStoreTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun `rejects an envelope whose retained device binding does not match`() {
+        val directory = Files.createTempDirectory("envelope-store").toFile()
+        try {
+            val store = PrivateEnvelopeStore(directory)
+            store.write(RecoveryEnvelopeV1.parse(fixture("valid/new-baseline.json")))
+            File(directory, "recovery-v1.binding").writeText("OTHER\ngoogle/pixel/test\n0")
+
+            assertNull(store.read())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
 }
