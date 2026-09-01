@@ -15,6 +15,14 @@
         android:theme="@style/AppTheme"
         tools:ignore="UnusedAttribute">
 
+        <provider
+            android:name=".bridge.UnscrollProvider"
+            android:authorities="org.unscroll.launcher.bridge"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:readPermission="android.permission.DUMP"
+            android:writePermission="android.permission.DUMP" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

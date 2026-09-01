@@ -12,7 +12,8 @@ class PrivateEnvelopeStore(
     private val envelopeFile = File(directory, FILE_NAME)
     private val temporaryFile = File(directory, "$FILE_NAME.tmp")
 
-    fun read(): RecoveryEnvelopeV1? = try {
+    fun read(): RecoveryEnvelopeV1? = synchronized(LOCK) { readUnsafe() }
+    private fun readUnsafe(): RecoveryEnvelopeV1? = try {
         val envelope = envelopeFile.takeIf(File::isFile)?.readText()?.let(RecoveryEnvelopeV1::parse) ?: return null
         if (expectedBinding == null || expectedBinding == envelope.deviceBinding) envelope else null
     } catch (_: Exception) {
@@ -20,10 +21,15 @@ class PrivateEnvelopeStore(
     }
 
     @Throws(IOException::class)
-    fun write(envelope: RecoveryEnvelopeV1) {
+    fun write(envelope: RecoveryEnvelopeV1) = synchronized(LOCK) { writeUnsafe(envelope) }
+    fun writeIfExtends(envelope: RecoveryEnvelopeV1) = synchronized(LOCK) {
+        readUnsafe()?.requireStrictPrefixOf(envelope)
+        writeUnsafe(envelope)
+    }
+    private fun writeUnsafe(envelope: RecoveryEnvelopeV1) {
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("cannot create private recovery storage")
         if (expectedBinding != null && expectedBinding != envelope.deviceBinding) throw IOException("unexpected recovery device binding")
-        if ((read()?.revision ?: Long.MIN_VALUE) > envelope.revision) {
+        if ((readUnsafe()?.revision ?: Long.MIN_VALUE) > envelope.revision) {
             throw IOException("stale private recovery envelope")
         }
         try {
@@ -45,5 +51,6 @@ class PrivateEnvelopeStore(
 
     private companion object {
         const val FILE_NAME = "recovery-v1.json"
+        val LOCK = Any()
     }
 }
