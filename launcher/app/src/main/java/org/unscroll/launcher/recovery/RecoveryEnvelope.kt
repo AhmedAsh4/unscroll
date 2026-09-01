@@ -22,6 +22,21 @@ private sealed interface Json {
 
 class RecoveryEnvelopeV1 private constructor(private val value: Json) {
     val checksum: String get() = stringAt("checksum") ?: ""
+    val activeAllowedPackages: Set<String>
+        get() {
+            validate()
+            val policy = obj(part("active_policy") ?: fail(ValidationError.FIELD), ValidationError.FIELD)
+            return arr(policy["allowed_packages"] ?: fail(ValidationError.FIELD), ValidationError.FIELD)
+                .map { pkg -> text(pkg, ValidationError.FIELD) }
+                .toSet()
+        }
+    val baselineLauncherPackage: String
+        get() {
+            validate()
+            val baseline = obj(part("baseline") ?: fail(ValidationError.BASELINE), ValidationError.BASELINE)
+            return text(baseline["baseline_launcher_package"] ?: fail(ValidationError.BASELINE), ValidationError.BASELINE)
+        }
+    val revision: Long get() { validate(); return numberAt("revision") ?: fail(ValidationError.FIELD) }
 
     fun canonicalJson(): String = canonical(value)
     fun computedChecksum(): String = sha256(canonicalWithout(value, "checksum"))

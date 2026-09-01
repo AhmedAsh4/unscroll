@@ -7,7 +7,7 @@ import java.io.File
 
 class RecoveryEnvelopeTest {
     private fun fixture(name: String): String {
-        var directory = File(System.getProperty("user.dir"))
+        var directory = File(System.getProperty("user.dir") ?: error("missing user directory"))
         repeat(6) {
             val candidate = File(directory, "contracts/fixtures/recovery-v1/$name")
             if (candidate.isFile) return candidate.readText()
@@ -111,5 +111,14 @@ class RecoveryEnvelopeTest {
         } catch (error: RecoveryValidationException) {
             assertEquals(ValidationError.DEVICE_BINDING, error.classification)
         }
+    }
+
+    @Test
+    fun exposesOnlyValidatedPolicyFacts() {
+        val envelope = RecoveryEnvelopeV1.parse(fixture("valid/applied-mutation.json"))
+
+        assertEquals(setOf("com.phone"), envelope.activeAllowedPackages)
+        assertEquals("com.android.launcher3", envelope.baselineLauncherPackage)
+        assertEquals(2, envelope.revision)
     }
 }

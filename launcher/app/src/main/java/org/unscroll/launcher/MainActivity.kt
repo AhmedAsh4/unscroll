@@ -17,9 +17,13 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import org.unscroll.launcher.catalog.LauncherEntry
 import org.unscroll.launcher.catalog.visibleEntries
+import org.unscroll.launcher.policy.ActivePolicyStore
+import org.unscroll.launcher.policy.PolicyFilter
+import org.unscroll.launcher.recovery.PrivateEnvelopeStore
 
 class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
+    private lateinit var policyStore: ActivePolicyStore
     private lateinit var content: LinearLayout
     private var entries: List<LauncherEntry> = emptyList()
     private var drawerOpen = false
@@ -28,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("unscroll-launcher", MODE_PRIVATE)
+        policyStore = ActivePolicyStore(PrivateEnvelopeStore(filesDir))
         entries = packageManager.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
             0,
@@ -53,12 +58,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun showHome() {
         drawerOpen = false
-        showScreen(getString(R.string.app_name), visibleEntries(entries, packageName, "").take(8), false)
+        showScreen(getString(R.string.app_name), visibleEntries(policyEntries(), packageName, "").take(8), false)
     }
 
     private fun showDrawer(query: String = "") {
         drawerOpen = true
-        showScreen(getString(R.string.all_apps), visibleEntries(entries, packageName, query), true, query)
+        showScreen(getString(R.string.all_apps), visibleEntries(policyEntries(), packageName, query), true, query)
     }
 
     private fun showScreen(title: String, listed: List<LauncherEntry>, searchable: Boolean, query: String = "") {
@@ -86,7 +91,7 @@ class MainActivity : AppCompatActivity() {
                 setSingleLine()
                 setText(query)
                 setSelection(query.length)
-                addTextChangedListener(SimpleTextWatcher { renderEntries(appList, visibleEntries(entries, packageName, it)) })
+                addTextChangedListener(SimpleTextWatcher { renderEntries(appList, visibleEntries(policyEntries(), packageName, it)) })
             })
         }
         content.addView(ScrollView(this).apply {
@@ -120,6 +125,13 @@ class MainActivity : AppCompatActivity() {
         container.removeAllViews()
         listed.forEach { container.addView(appButton(it)) }
     }
+
+    private fun policyEntries(): List<LauncherEntry> = PolicyFilter.filter(
+        entries,
+        policyStore.current(),
+        packageName,
+        emptySet(),
+    )
 
     private fun textSize(): Float = prefs.getFloat("text_size", 20f)
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
