@@ -1,15 +1,13 @@
 use std::{fs, path::Path};
 use unscroll_desktop_lib::{
     adb::{
-        require_success, Adb, AdbCommand, AppOp, AppOpMode, BridgeOperation, BundledAdb, Component,
-        DeviceOperation, Fingerprint, PackageId, Property, Serial, StreamId, UserId,
+        require_success, Adb, AdbCommand, AdbOutput, AppOp, AppOpMode, BridgeOperation, BundledAdb,
+        Component, DeviceOperation, Fingerprint, PackageId, Property, Serial, StreamId, UserId,
     },
     device::{discover, Discovery},
 };
-
 const FIXTURE: &str = "org.unscroll.fixture";
 const LAUNCHER: &str = "org.unscroll.launcher";
-
 #[derive(Default, Clone, Copy)]
 pub struct ProbeConfig {
     disposable_snapshot: bool,
@@ -21,319 +19,484 @@ impl ProbeConfig {
         }
     }
 }
-
 pub struct ProbeReport {
     passed: bool,
+    api: String,
+    model: String,
+    fingerprint: String,
     outcomes: Vec<(&'static str, bool)>,
-    diagnostic_retained: bool,
+    diagnostics: Vec<&'static str>,
 }
 impl ProbeReport {
     pub fn passed(&self) -> bool {
         self.passed
     }
+    pub fn diagnostics(&self) -> &[&'static str] {
+        &self.diagnostics
+    }
     pub fn machine_json(&self) -> String {
-        let outcomes = self
+        let o = self
             .outcomes
             .iter()
-            .map(|(name, ok)| format!("{{\"capability\":\"{name}\",\"passed\":{ok}}}"))
+            .map(|(n, x)| format!("{{\"capability\":\"{n}\",\"passed\":{x}}}"))
             .collect::<Vec<_>>()
             .join(",");
-        format!("{{\"telemetry\":false,\"outcomes\":[{outcomes}],\"passed\":{},\"diagnostic_retained\":{}}}", self.passed, self.diagnostic_retained)
+        let d = self
+            .diagnostics
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"telemetry\":false,\"api\":\"{}\",\"model\":\"{}\",\"fingerprint\":\"{}\",\"outcomes\":[{o}],\"diagnostics\":[{d}],\"passed\":{}}}",self.api,self.model,self.fingerprint,self.passed)
     }
     pub fn summary(&self) -> String {
-        let failed = self
-            .outcomes
-            .iter()
-            .filter(|(_, ok)| !ok)
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>()
-            .join(", ");
         format!(
-            "API evidence is local only. {}{}",
+            "API {} {}: {}{}{}",
+            self.api,
+            self.model,
             if self.passed {
                 "compatibility gate passed"
             } else {
                 "compatibility gate failed"
             },
-            if self.diagnostic_retained {
-                "; diagnostic retained"
-            } else if failed.is_empty() {
+            if self.diagnostics.is_empty() {
                 ""
             } else {
-                "; failed: "
-            }
-        ) + if failed.is_empty() { "" } else { &failed }
+                "; diagnostic retained"
+            },
+            self.outcomes
+                .first()
+                .filter(|(_, ok)| !*ok)
+                .map(|(name, _)| format!("; {name}"))
+                .unwrap_or_default()
+        )
     }
-    pub fn write_local(&self, directory: &Path) -> std::io::Result<()> {
-        fs::create_dir_all(directory)?;
-        fs::write(directory.join("probe-results.json"), self.machine_json())?;
-        fs::write(directory.join("probe-summary.txt"), self.summary())
+    pub fn write_local(&self, d: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(d)?;
+        fs::write(d.join("probe-results.json"), self.machine_json())?;
+        fs::write(d.join("probe-summary.txt"), self.summary())
     }
 }
-
-fn command(
+fn exec(
     adb: &mut impl Adb,
-    serial: &Serial,
-    operation: DeviceOperation,
-    name: &'static str,
-    outcomes: &mut Vec<(&'static str, bool)>,
-) -> bool {
-    let ok = adb
+    s: &Serial,
+    op: DeviceOperation,
+    n: &'static str,
+    o: &mut Vec<(&'static str, bool)>,
+    d: &mut Vec<&'static str>,
+) -> Option<AdbOutput> {
+    match adb
         .execute(AdbCommand::Device {
-            serial: serial.clone(),
-            operation,
+            serial: s.clone(),
+            operation: op,
         })
         .and_then(require_success)
-        .is_ok();
-    outcomes.push((name, ok));
-    ok
+    {
+        Ok(x) => {
+            o.push((n, true));
+            Some(x)
+        }
+        Err(_) => {
+            o.push((n, false));
+            d.push(n);
+            None
+        }
+    }
 }
-
-pub fn run(adb: &mut impl Adb, serial: Serial, config: ProbeConfig) -> ProbeReport {
-    if !config.disposable_snapshot {
+fn text(x: Option<AdbOutput>) -> Option<String> {
+    x.map(|v| v.stdout().trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+fn installed(x: &str, p: &PackageId) -> bool {
+    x.lines()
+        .any(|l| l.trim() == format!("package:{}", p.as_str()))
+}
+fn appop(x: &str) -> Option<AppOpMode> {
+    ["default", "allow", "ignore"].into_iter().find_map(|m| {
+        x.contains(&format!(": {m}"))
+            .then(|| AppOpMode::parse(m).ok())
+            .flatten()
+    })
+}
+fn home(x: &str) -> Option<PackageId> {
+    x.trim()
+        .split_once('/')
+        .and_then(|(p, _)| PackageId::parse(p).ok())
+}
+fn state(x: &str, want: bool) -> bool {
+    x.lines().any(|l| l.trim() == format!("suspended={want}"))
+}
+fn stream(x: &str) -> Option<StreamId> {
+    x.split(|c: char| !c.is_ascii_hexdigit())
+        .find_map(|v| StreamId::parse(v).ok())
+}
+pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
+    let (mut o, mut d) = (Vec::new(), Vec::new());
+    if !c.disposable_snapshot {
         return ProbeReport {
             passed: false,
+            api: "unavailable".into(),
+            model: "unavailable".into(),
+            fingerprint: "unavailable".into(),
             outcomes: vec![("disposable fixture or snapshot required", false)],
-            diagnostic_retained: false,
+            diagnostics: d,
         };
-    }
-    let user = UserId::parse(0).expect("primary user");
-    let fixture = PackageId::parse(FIXTURE).expect("fixed fixture package");
-    let launcher = PackageId::parse(LAUNCHER).expect("fixed launcher package");
-    let app_op = AppOp::parse("POST_NOTIFICATION").expect("fixed app op");
-    let mut outcomes = Vec::new();
-    let core = [
-        command(
-            adb,
-            &serial,
-            DeviceOperation::GetProperty(Property::SdkInt),
-            "api",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::GetProperty(Property::Model),
-            "model",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::GetProperty(Property::Fingerprint),
-            "fingerprint",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::PackageInfo {
-                package: fixture.clone(),
-                user,
-            },
-            "fixture installation",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::Bridge(BridgeOperation::Health),
-            "bridge protection",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::Bridge(BridgeOperation::DeviceFacts {
-                device_serial: serial.clone(),
-            }),
-            "bridge facts",
-            &mut outcomes,
-        ),
-    ]
-    .into_iter()
-    .all(|ok| ok);
-    if !core {
+    };
+    let u = UserId::parse(0).unwrap();
+    let f = PackageId::parse(FIXTURE).unwrap();
+    let l = PackageId::parse(LAUNCHER).unwrap();
+    let op = AppOp::parse("POST_NOTIFICATION").unwrap();
+    let api = text(exec(
+        adb,
+        &s,
+        DeviceOperation::GetProperty(Property::SdkInt),
+        "api",
+        &mut o,
+        &mut d,
+    ))
+    .unwrap_or_else(|| "unavailable".into());
+    let model = text(exec(
+        adb,
+        &s,
+        DeviceOperation::GetProperty(Property::Model),
+        "model",
+        &mut o,
+        &mut d,
+    ))
+    .unwrap_or_else(|| "unavailable".into());
+    let fp = text(exec(
+        adb,
+        &s,
+        DeviceOperation::GetProperty(Property::Fingerprint),
+        "fingerprint",
+        &mut o,
+        &mut d,
+    ))
+    .unwrap_or_else(|| "unavailable".into());
+    let binding = Fingerprint::parse(&fp).ok();
+    let fixture = text(exec(
+        adb,
+        &s,
+        DeviceOperation::PackageInfo {
+            package: f.clone(),
+            user: u,
+        },
+        "fixture installation",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| installed(&x, &f));
+    o.last_mut().unwrap().1 = fixture;
+    let health = text(exec(
+        adb,
+        &s,
+        DeviceOperation::Bridge(BridgeOperation::Health),
+        "bridge protection",
+        &mut o,
+        &mut d,
+    ))
+    .is_some();
+    let facts = text(exec(
+        adb,
+        &s,
+        DeviceOperation::Bridge(BridgeOperation::DeviceFacts {
+            device_serial: s.clone(),
+        }),
+        "bridge facts",
+        &mut o,
+        &mut d,
+    ))
+    .is_some();
+    if !fixture || !health || !facts || binding.is_none() {
         return ProbeReport {
             passed: false,
-            outcomes,
-            diagnostic_retained: true,
+            api,
+            model,
+            fingerprint: fp,
+            outcomes: o,
+            diagnostics: d,
         };
-    }
-    let fingerprint = Fingerprint::parse("probe-fingerprint").expect("fixed fake binding");
-    let icon = StreamId::parse("0123456789abcdef0123456789abcdef").expect("fixed fake stream");
-    let component =
-        Component::parse("org.unscroll.fixture/.FixtureActivity").expect("fixed fixture component");
-    for (name, operation) in [
-        (
-            "catalog and protected facts",
-            DeviceOperation::Bridge(BridgeOperation::Catalog {
-                device_serial: serial.clone(),
-                fingerprint: fingerprint.clone(),
-            }),
-        ),
-        (
-            "icon metadata",
-            DeviceOperation::Bridge(BridgeOperation::Icon {
-                package: fixture.clone(),
-                component,
-            }),
-        ),
-        (
+    };
+    let binding = binding.unwrap();
+    let catalog = text(exec(
+        adb,
+        &s,
+        DeviceOperation::Bridge(BridgeOperation::Catalog {
+            device_serial: s.clone(),
+            fingerprint: binding.clone(),
+        }),
+        "catalog and protected facts",
+        &mut o,
+        &mut d,
+    ))
+    .is_some();
+    let component = Component::parse("org.unscroll.fixture/.FixtureActivity").unwrap();
+    let icon = text(exec(
+        adb,
+        &s,
+        DeviceOperation::Bridge(BridgeOperation::Icon {
+            package: f.clone(),
+            component,
+        }),
+        "icon metadata",
+        &mut o,
+        &mut d,
+    ))
+    .and_then(|x| stream(&x));
+    let icon = icon.is_some_and(|id| {
+        text(exec(
+            adb,
+            &s,
+            DeviceOperation::Bridge(BridgeOperation::ReadIcon(id)),
             "icon streaming",
-            DeviceOperation::Bridge(BridgeOperation::ReadIcon(icon)),
-        ),
-        (
-            "recovery access",
-            DeviceOperation::Bridge(BridgeOperation::ReadEnvelope {
-                device_serial: serial.clone(),
-                fingerprint,
-            }),
-        ),
-        (
-            "notification baseline",
-            DeviceOperation::AppOpGet {
-                package: fixture.clone(),
-                user,
-                app_op: app_op.clone(),
-            },
-        ),
-        ("home baseline", DeviceOperation::HomeResolve),
-        ("guided chooser", DeviceOperation::HomeChooser),
-        (
-            "shell home selection",
-            DeviceOperation::HomeSelect(launcher.clone()),
-        ),
-        ("resolved home", DeviceOperation::HomeResolve),
-        (
-            "suspension",
-            DeviceOperation::Suspend {
-                package: fixture.clone(),
-                user,
-                suspended: true,
-            },
-        ),
-        (
-            "suspension verified",
-            DeviceOperation::PackageInfo {
-                package: fixture.clone(),
-                user,
-            },
-        ),
-        (
-            "notification suppression",
-            DeviceOperation::AppOpSet {
-                package: fixture.clone(),
-                user,
-                app_op: app_op.clone(),
-                mode: AppOpMode::Ignore,
-            },
-        ),
-        (
-            "notification suppression verified",
-            DeviceOperation::AppOpGet {
-                package: fixture.clone(),
-                user,
-                app_op: app_op.clone(),
-            },
-        ),
-        (
-            "store detection",
-            DeviceOperation::PackageInfo {
-                package: PackageId::parse("com.android.vending").unwrap(),
-                user,
-            },
-        ),
-    ] {
-        command(adb, &serial, operation, name, &mut outcomes);
-    }
-    let restore = [
-        command(
-            adb,
-            &serial,
-            DeviceOperation::AppOpSet {
-                package: fixture.clone(),
-                user,
-                app_op: app_op.clone(),
-                mode: AppOpMode::Default,
-            },
-            "notification restored",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::AppOpGet {
-                package: fixture.clone(),
-                user,
-                app_op,
-            },
-            "notification restoration verified",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::Suspend {
-                package: fixture.clone(),
-                user,
-                suspended: false,
-            },
-            "unsuspension",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::PackageInfo {
-                package: fixture,
-                user,
-            },
-            "unsuspension verified",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::HomeSelect(launcher),
-            "home restored",
-            &mut outcomes,
-        ),
-        command(
-            adb,
-            &serial,
-            DeviceOperation::HomeResolve,
-            "home restoration verified",
-            &mut outcomes,
-        ),
-    ]
-    .into_iter()
-    .all(|ok| ok);
-    let passed = core && restore && outcomes.iter().all(|(_, ok)| *ok);
+            &mut o,
+            &mut d,
+        ))
+        .is_some()
+    });
+    let recovery = text(exec(
+        adb,
+        &s,
+        DeviceOperation::Bridge(BridgeOperation::ReadEnvelope {
+            device_serial: s.clone(),
+            fingerprint: binding,
+        }),
+        "recovery access",
+        &mut o,
+        &mut d,
+    ))
+    .is_some();
+    if !catalog || !icon || !recovery {
+        return ProbeReport {
+            passed: false,
+            api,
+            model,
+            fingerprint: fp,
+            outcomes: o,
+            diagnostics: d,
+        };
+    };
+    let baseop = text(exec(
+        adb,
+        &s,
+        DeviceOperation::AppOpGet {
+            package: f.clone(),
+            user: u,
+            app_op: op.clone(),
+        },
+        "notification baseline",
+        &mut o,
+        &mut d,
+    ))
+    .and_then(|x| appop(&x));
+    let basehome = text(exec(
+        adb,
+        &s,
+        DeviceOperation::HomeResolve,
+        "home baseline",
+        &mut o,
+        &mut d,
+    ))
+    .and_then(|x| home(&x));
+    if baseop.is_none() || basehome.is_none() {
+        return ProbeReport {
+            passed: false,
+            api,
+            model,
+            fingerprint: fp,
+            outcomes: o,
+            diagnostics: d,
+        };
+    };
+    let (baseop, basehome) = (baseop.unwrap(), basehome.unwrap());
+    exec(
+        adb,
+        &s,
+        DeviceOperation::HomeChooser,
+        "guided chooser",
+        &mut o,
+        &mut d,
+    );
+    exec(
+        adb,
+        &s,
+        DeviceOperation::HomeSelect(l.clone()),
+        "shell home selection",
+        &mut o,
+        &mut d,
+    );
+    let selected = text(exec(
+        adb,
+        &s,
+        DeviceOperation::HomeResolve,
+        "resolved home",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| home(&x).as_ref() == Some(&l));
+    o.last_mut().unwrap().1 = selected;
+    exec(
+        adb,
+        &s,
+        DeviceOperation::Suspend {
+            package: f.clone(),
+            user: u,
+            suspended: true,
+        },
+        "suspension",
+        &mut o,
+        &mut d,
+    );
+    let suspended = text(exec(
+        adb,
+        &s,
+        DeviceOperation::PackageState {
+            package: f.clone(),
+            user: u,
+        },
+        "suspension verified",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| state(&x, true));
+    o.last_mut().unwrap().1 = suspended;
+    exec(
+        adb,
+        &s,
+        DeviceOperation::AppOpSet {
+            package: f.clone(),
+            user: u,
+            app_op: op.clone(),
+            mode: AppOpMode::Ignore,
+        },
+        "notification suppression",
+        &mut o,
+        &mut d,
+    );
+    let ignored = text(exec(
+        adb,
+        &s,
+        DeviceOperation::AppOpGet {
+            package: f.clone(),
+            user: u,
+            app_op: op.clone(),
+        },
+        "notification suppression verified",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| appop(&x) == Some(AppOpMode::Ignore));
+    o.last_mut().unwrap().1 = ignored;
+    let store = PackageId::parse("com.android.vending").unwrap();
+    let storeok = text(exec(
+        adb,
+        &s,
+        DeviceOperation::PackageInfo {
+            package: store.clone(),
+            user: u,
+        },
+        "store detection",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| installed(&x, &store));
+    o.last_mut().unwrap().1 = storeok;
+    exec(
+        adb,
+        &s,
+        DeviceOperation::AppOpSet {
+            package: f.clone(),
+            user: u,
+            app_op: op.clone(),
+            mode: baseop,
+        },
+        "notification restored",
+        &mut o,
+        &mut d,
+    );
+    let opok = text(exec(
+        adb,
+        &s,
+        DeviceOperation::AppOpGet {
+            package: f.clone(),
+            user: u,
+            app_op: op,
+        },
+        "notification restoration verified",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| appop(&x) == Some(baseop));
+    o.last_mut().unwrap().1 = opok;
+    exec(
+        adb,
+        &s,
+        DeviceOperation::Suspend {
+            package: f.clone(),
+            user: u,
+            suspended: false,
+        },
+        "unsuspension",
+        &mut o,
+        &mut d,
+    );
+    let unsuspended = text(exec(
+        adb,
+        &s,
+        DeviceOperation::PackageState {
+            package: f,
+            user: u,
+        },
+        "unsuspension verified",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| state(&x, false));
+    o.last_mut().unwrap().1 = unsuspended;
+    exec(
+        adb,
+        &s,
+        DeviceOperation::HomeSelect(basehome.clone()),
+        "home restored",
+        &mut o,
+        &mut d,
+    );
+    let homeok = text(exec(
+        adb,
+        &s,
+        DeviceOperation::HomeResolve,
+        "home restoration verified",
+        &mut o,
+        &mut d,
+    ))
+    .is_some_and(|x| home(&x).as_ref() == Some(&basehome));
+    o.last_mut().unwrap().1 = homeok;
+    let passed = o.iter().all(|(_, x)| *x);
     ProbeReport {
         passed,
-        outcomes,
-        diagnostic_retained: !restore,
+        api,
+        model,
+        fingerprint: fp,
+        outcomes: o,
+        diagnostics: d,
     }
 }
-
 #[allow(dead_code)]
 fn main() {
-    let config = std::env::args()
-        .any(|arg| arg == "--disposable-snapshot")
+    let c = std::env::args()
+        .any(|a| a == "--disposable-snapshot")
         .then(ProbeConfig::disposable_snapshot)
         .unwrap_or_default();
     let mut adb = match BundledAdb::for_development() {
-        Ok(adb) => adb,
+        Ok(x) => x,
         Err(_) => return,
     };
-    let serial = match discover(&mut adb) {
+    let s = match discover(&mut adb) {
         Ok(Discovery::One { serial }) => serial,
         _ => return,
     };
-    let report = run(&mut adb, serial, config);
-    let _ = report.write_local(Path::new("probe-results"));
-    if !report.passed() {
-        std::process::exit(1);
+    let r = run(&mut adb, s, c);
+    if r.write_local(Path::new("probe-results")).is_err() || !r.passed() {
+        std::process::exit(1)
     }
 }

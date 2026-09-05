@@ -260,6 +260,10 @@ pub enum DeviceOperation {
         package: PackageId,
         user: UserId,
     },
+    PackageState {
+        package: PackageId,
+        user: UserId,
+    },
     AppOpGet {
         package: PackageId,
         user: UserId,
@@ -311,6 +315,13 @@ impl AdbCommand {
                         "package".into(),
                         "list".into(),
                         "packages".into(),
+                        "--user".into(),
+                        user.get().to_string(),
+                        package.0.clone(),
+                    ]),
+                    DeviceOperation::PackageState { package, user } => args.extend([
+                        "dumpsys".into(),
+                        "package".into(),
                         "--user".into(),
                         user.get().to_string(),
                         package.0.clone(),
@@ -427,6 +438,10 @@ impl AdbCommand {
                 operation: DeviceOperation::PackageInfo { .. },
                 ..
             } => "package-info",
+            Self::Device {
+                operation: DeviceOperation::PackageState { .. },
+                ..
+            } => "package-state",
             Self::Device {
                 operation: DeviceOperation::AppOpGet { .. },
                 ..

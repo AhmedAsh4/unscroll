@@ -140,6 +140,26 @@ fn closed_commands_construct_only_validated_argument_arrays() {
     assert_eq!(
         AdbCommand::Device {
             serial: serial.clone(),
+            operation: DeviceOperation::PackageState {
+                package: PackageId::parse("org.unscroll.fixture").unwrap(),
+                user,
+            },
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "R58M1234ABC",
+            "shell",
+            "dumpsys",
+            "package",
+            "--user",
+            "0",
+            "org.unscroll.fixture"
+        ]
+    );
+    assert_eq!(
+        AdbCommand::Device {
+            serial: serial.clone(),
             operation: DeviceOperation::PackageInfo {
                 package: package.clone(),
                 user
