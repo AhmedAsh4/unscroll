@@ -21,6 +21,7 @@
   },
   "bundle": {
     "active": false,
+    "externalBin": [],
     "resources": {
       "resources/adb/*": "adb/"
     }

@@ -1,8 +1,8 @@
 use std::{path::PathBuf, time::Duration};
 use unscroll_desktop_lib::adb::{
     parse_devices, redacted_diagnostic, require_success, stop_server, AdbCommand, AdbError,
-    AdbOutput, AdbResponse, AppOp, BundledAdb, Component, Destination, DeviceOperation, FakeAdb,
-    PackageId, Property, Serial, UserId,
+    AdbOutput, AdbResponse, AppOp, AppOpMode, BridgeOperation, BundledAdb, Component, Destination,
+    DeviceOperation, FakeAdb, PackageId, Property, Serial, StreamId, UserId,
 };
 use unscroll_desktop_lib::device::{
     classify_api, classify_bootstrap, discover, ApiSupport, BootstrapError, Discovery,
@@ -217,6 +217,85 @@ fn closed_commands_construct_only_validated_argument_arrays() {
         ]
     );
     assert_eq!(AdbCommand::Devices.timeout(), Duration::from_secs(10));
+}
+
+#[test]
+fn probe_commands_are_closed_validated_argument_arrays() {
+    let serial = Serial::parse("emulator-5554").unwrap();
+    let user = UserId::parse(0).unwrap();
+    let fixture = PackageId::parse("org.unscroll.fixture").unwrap();
+    let icon = StreamId::parse("0123456789abcdef0123456789abcdef").unwrap();
+    assert!(StreamId::parse("not-a-stream-id").is_err());
+    assert_eq!(
+        AdbCommand::Device {
+            serial: serial.clone(),
+            operation: DeviceOperation::Suspend {
+                package: fixture.clone(),
+                user,
+                suspended: true
+            }
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "shell",
+            "cmd",
+            "package",
+            "suspend",
+            "--user",
+            "0",
+            "org.unscroll.fixture"
+        ]
+    );
+    assert_eq!(
+        AdbCommand::Device {
+            serial: serial.clone(),
+            operation: DeviceOperation::AppOpSet {
+                package: fixture.clone(),
+                user,
+                app_op: AppOp::parse("POST_NOTIFICATION").unwrap(),
+                mode: AppOpMode::Ignore
+            }
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "shell",
+            "appops",
+            "set",
+            "--user",
+            "0",
+            "org.unscroll.fixture",
+            "POST_NOTIFICATION",
+            "ignore"
+        ]
+    );
+    assert_eq!(
+        AdbCommand::Device {
+            serial: serial.clone(),
+            operation: DeviceOperation::Bridge(BridgeOperation::Health)
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "shell",
+            "content",
+            "call",
+            "--uri",
+            "content://org.unscroll.launcher.bridge",
+            "--method",
+            "recovery-v1",
+            "--extra",
+            "request:s:{\"operation\":\"health\",\"args\":{}}"
+        ]
+    );
+    assert_eq!(
+        AdbCommand::Device { serial, operation: DeviceOperation::Bridge(BridgeOperation::ReadIcon(icon)) }.arguments(),
+        vec!["-s", "emulator-5554", "shell", "content", "read", "--uri", "content://org.unscroll.launcher.bridge/recovery-v1/icon/0123456789abcdef0123456789abcdef"]
+    );
 }
 
 #[test]
