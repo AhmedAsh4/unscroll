@@ -1,0 +1,2 @@
+List of devices attached
+192.168.1.2:5555	device transport_id:1

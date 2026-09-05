@@ -1,0 +1,3 @@
+List of devices attached
+R58M1234ABC	device
+ZX1G22	device

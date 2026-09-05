@@ -15,10 +15,10 @@ data class AppCatalog(val entries: List<CatalogEntry>) {
         const val MAX_PAGE = 100
 
         fun create(candidates: List<CatalogCandidate>, protected: Map<String, String>, userId: Long = 0): AppCatalog = AppCatalog(
-            candidates.asSequence().filter { it.launchable }.groupBy { it.packageId }
+            candidates.asSequence().filter { it.launchable && it.packageId.toByteArray().size <= 512 && it.activityName.toByteArray().size <= 512 }.groupBy { it.packageId }
                 .map { (_, matches) -> matches.minWith(compareBy<CatalogCandidate> { it.label.lowercase(Locale.ROOT) }.thenBy { it.label }.thenBy { it.activityName }) }
                 .sortedWith(compareBy<CatalogCandidate> { it.label.lowercase(Locale.ROOT) }.thenBy { it.packageId })
-                .map { CatalogEntry(it.packageId, it.activityName, ascii(it.label, it.packageId), userId, true, it.enabled, it.suspended, it.hasActivityIcon, it.hasApplicationIcon, it.hasActivityIcon || it.hasApplicationIcon, protected[it.packageId]) }.toList(),
+                .map { CatalogEntry(it.packageId, it.activityName, ascii(it.label, it.packageId), userId, true, it.enabled, it.suspended, it.hasActivityIcon, it.hasApplicationIcon, it.hasActivityIcon || it.hasApplicationIcon, protected[it.packageId]?.let { reason -> ascii(reason, "protected") }) }.toList(),
         )
 
         fun installed(packageManager: PackageManager, protected: Map<String, String>, userId: Long): AppCatalog = create(

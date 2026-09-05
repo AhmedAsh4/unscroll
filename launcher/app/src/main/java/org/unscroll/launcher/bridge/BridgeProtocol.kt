@@ -36,6 +36,7 @@ object BridgeProtocol {
     fun failure(error: BridgeError, message: String = error.code): String = Json.write(mapOf("protocol_version" to VERSION, "ok" to false, "error" to mapOf("code" to error.code, "message" to message.take(512).filter { it.code in 0x20..0x7e }.ifBlank { error.code })))
     fun objectArgs(request: BridgeRequest, keys: Set<String>): Map<String, Any?> { if (request.arguments.keys != keys) throw BridgeException(BridgeError.INVALID_REQUEST); return request.arguments }
     fun string(value: Any?): String = value as? String ?: throw BridgeException(BridgeError.INVALID_REQUEST)
+    fun boundedString(value: Any?, limit: Int = 512): String = string(value).takeIf { it.toByteArray(Charsets.UTF_8).size <= limit } ?: throw BridgeException(BridgeError.INVALID_REQUEST)
     fun number(value: Any?): Long = value as? Long ?: throw BridgeException(BridgeError.INVALID_REQUEST)
 
     private object Json {

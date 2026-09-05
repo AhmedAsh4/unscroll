@@ -1,0 +1,2 @@
+List of devices attached
+R58M1234ABC	device product:husky model:Pixel_8 device:husky transport_id:1

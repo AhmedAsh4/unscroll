@@ -75,4 +75,14 @@ class AppCatalogTest {
         assertTrue(entry.applicationIconAvailable)
         assertTrue(entry.iconAvailable)
     }
+
+    @Test
+    fun `catalog excludes metadata above 512 bytes`() {
+        val catalog = AppCatalog.create(
+            listOf(CatalogCandidate("com." + "a".repeat(510), "Too long", true, false, true, true)),
+            emptyMap(),
+        )
+
+        assertTrue(catalog.entries.isEmpty())
+    }
 }

@@ -1,0 +1,2 @@
+List of devices attached
+adb-ABCD._adb-tls-connect._tcp  device transport_id:1

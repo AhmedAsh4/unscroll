@@ -2,6 +2,7 @@ package org.unscroll.launcher.bridge
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class BridgeProtocolTest {
@@ -53,5 +54,16 @@ class BridgeProtocolTest {
         assertEquals(maxEnvelope, BridgeProtocol.parseRequest(request).arguments["envelope"])
         assertTrue(BridgeProtocol.response(mapOf("envelope" to maxEnvelope)).toByteArray().size <= 262_144)
         assertEquals(BridgeError.INVALID_REQUEST, BridgeProtocol.parseError(request("\"".repeat(65_537))))
+    }
+
+    @Test
+    fun `rejects catalog and icon metadata above 512 bytes`() {
+        assertEquals("x".repeat(512), BridgeProtocol.boundedString("x".repeat(512)))
+        try {
+            BridgeProtocol.boundedString("x".repeat(513))
+            fail("metadata above the bridge bound must reject")
+        } catch (error: BridgeException) {
+            assertEquals(BridgeError.INVALID_REQUEST, error.error)
+        }
     }
 }

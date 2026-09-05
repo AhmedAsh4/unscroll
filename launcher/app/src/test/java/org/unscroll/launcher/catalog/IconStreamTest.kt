@@ -3,6 +3,8 @@ package org.unscroll.launcher.catalog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import javax.imageio.ImageIO
 
 class IconStreamTest {
     @Test
@@ -19,6 +21,11 @@ class IconStreamTest {
         assertEquals(IconSource.ACTIVITY, IconStream.selectSource(activityIconAvailable = true, applicationIconAvailable = true))
         assertEquals(IconSource.APPLICATION, IconStream.selectSource(activityIconAvailable = false, applicationIconAvailable = true))
         assertEquals(null, IconStream.selectSource(activityIconAvailable = false, applicationIconAvailable = false))
+    }
+
+    @Test
+    fun `png payload decodes on the desktop JVM`() {
+        assertEquals(1, ImageIO.read(ByteArrayInputStream(ONE_PIXEL_PNG)).width)
     }
 
     companion object {

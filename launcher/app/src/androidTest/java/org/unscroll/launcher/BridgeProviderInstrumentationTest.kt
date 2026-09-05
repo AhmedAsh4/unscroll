@@ -18,6 +18,8 @@ import org.junit.After
 import org.junit.Assume.assumeFalse
 import java.security.MessageDigest
 import org.unscroll.launcher.catalog.IconStream
+import org.unscroll.launcher.bridge.BridgeError
+import org.unscroll.launcher.bridge.UnscrollProvider
 
 class BridgeProviderInstrumentationTest {
     private var wroteFixture = false
@@ -40,8 +42,16 @@ class BridgeProviderInstrumentationTest {
         if (wroteFixture) shell("run-as ${InstrumentationRegistry.getInstrumentation().targetContext.packageName} rm -f files/recovery-v1.json")
     }
 
-    @Test fun ordinaryTestApkCannotCallBridge() {
-        try { InstrumentationRegistry.getInstrumentation().context.contentResolver.call(uri, "bridge-v1", null, Bundle().apply { putString("request", request("health")) }); fail("separate test UID must be denied") } catch (_: SecurityException) { }
+    @Test fun ordinaryTestApkReadAndWriteAreDeniedWithTheDocumentedForbiddenContract() {
+        val ordinary = InstrumentationRegistry.getInstrumentation().context.contentResolver
+        listOf(request("read_envelope", """{"device_binding":{}}"""), request("write_envelope", """{"device_binding":{},"envelope":"{}"}""")).forEach { frame ->
+            try { ordinary.call(uri, "bridge-v1", null, Bundle().apply { putString("request", frame) }); fail("separate test UID must be denied") } catch (_: SecurityException) { }
+        }
+        val provider = UnscrollProvider()
+        listOf("read_envelope", "write_envelope").forEach { operation ->
+            val response = provider.call("bridge-v1", null, Bundle().apply { putString("request", request(operation)) }).getString("response")
+            assertTrue(response, response?.contains("\"code\":\"${BridgeError.FORBIDDEN.code}\"") == true)
+        }
     }
 
     @Test fun adbShellUsesBridgeAndReadsBoundedIconPipe() {
@@ -51,7 +61,12 @@ class BridgeProviderInstrumentationTest {
         val facts = call("device_facts", """{"serial":"$serial"}""")
         success(facts)
         val fingerprint = field(facts, "fingerprint")
-        success(call("catalog_page", """{"cursor":null,"page_size":1}"""))
+        val binding = """{"serial":"$serial","fingerprint":"$fingerprint","user_id":0}"""
+        val oversizedIdentifier = "a." + "b".repeat(511)
+        success(call("catalog_page", """{"cursor":null,"page_size":1,"device_binding":$binding}"""))
+        assertTrue(call("catalog_page", """{"cursor":null,"page_size":1,"device_binding":{"serial":"$serial","fingerprint":"wrong","user_id":0}}""").contains("device_mismatch"))
+        assertTrue(call("icon_stream", """{"package_id":"$oversizedIdentifier","activity_name":"org.unscroll.launcher.MainActivity","user_id":0}""").contains("invalid_request"))
+        assertTrue(call("icon_stream", """{"package_id":"org.unscroll.launcher","activity_name":"$oversizedIdentifier","user_id":0}""").contains("invalid_request"))
         val icon = call("icon_stream", """{"package_id":"${InstrumentationRegistry.getInstrumentation().targetContext.packageName}","activity_name":"org.unscroll.launcher.MainActivity","user_id":0}""")
         success(icon)
         val stream = field(icon, "stream_id")
