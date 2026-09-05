@@ -7,7 +7,6 @@ use unscroll_desktop_lib::{
     device::{discover, Discovery},
 };
 const FIXTURE: &str = "org.unscroll.fixture";
-const LAUNCHER: &str = "org.unscroll.launcher";
 #[derive(Default, Clone, Copy)]
 pub struct ProbeConfig {
     disposable_snapshot: bool,
@@ -25,14 +24,11 @@ pub struct ProbeReport {
     model: String,
     fingerprint: String,
     outcomes: Vec<(&'static str, bool)>,
-    diagnostics: Vec<&'static str>,
+    diagnostics: Vec<String>,
 }
 impl ProbeReport {
     pub fn passed(&self) -> bool {
         self.passed
-    }
-    pub fn diagnostics(&self) -> &[&'static str] {
-        &self.diagnostics
     }
     pub fn machine_json(&self) -> String {
         let o = self
@@ -44,7 +40,7 @@ impl ProbeReport {
         let d = self
             .diagnostics
             .iter()
-            .map(|n| format!("\"{n}\""))
+            .cloned()
             .collect::<Vec<_>>()
             .join(",");
         format!("{{\"telemetry\":false,\"api\":\"{}\",\"model\":\"{}\",\"fingerprint\":\"{}\",\"outcomes\":[{o}],\"diagnostics\":[{d}],\"passed\":{}}}",self.api,self.model,self.fingerprint,self.passed)
@@ -83,7 +79,7 @@ fn exec(
     op: DeviceOperation,
     n: &'static str,
     o: &mut Vec<(&'static str, bool)>,
-    d: &mut Vec<&'static str>,
+    d: &mut Vec<String>,
 ) -> Option<AdbOutput> {
     match adb
         .execute(AdbCommand::Device {
@@ -98,7 +94,7 @@ fn exec(
         }
         Err(_) => {
             o.push((n, false));
-            d.push(n);
+            d.push(format!("{{\"command_class\":\"{}\",\"error\":\"failed\",\"stdout\":\"redacted\",\"stderr\":\"redacted\"}}", n));
             None
         }
     }
@@ -118,13 +114,9 @@ fn appop(x: &str) -> Option<AppOpMode> {
             .flatten()
     })
 }
-fn home(x: &str) -> Option<PackageId> {
-    x.trim()
-        .split_once('/')
-        .and_then(|(p, _)| PackageId::parse(p).ok())
-}
-fn state(x: &str, want: bool) -> bool {
-    x.lines().any(|l| l.trim() == format!("suspended={want}"))
+pub fn suspended(x: &str, want: bool) -> bool {
+    x.split_whitespace()
+        .any(|field| field == format!("suspended={want}"))
 }
 fn stream(x: &str) -> Option<StreamId> {
     x.split(|c: char| !c.is_ascii_hexdigit())
@@ -144,7 +136,6 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
     };
     let u = UserId::parse(0).unwrap();
     let f = PackageId::parse(FIXTURE).unwrap();
-    let l = PackageId::parse(LAUNCHER).unwrap();
     let op = AppOp::parse("POST_NOTIFICATION").unwrap();
     let api = text(exec(
         adb,
@@ -297,7 +288,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     ))
-    .and_then(|x| home(&x));
+    .and_then(|x| Component::parse(x.trim()).ok());
     if baseop.is_none() || basehome.is_none() {
         return ProbeReport {
             passed: false,
@@ -309,6 +300,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         };
     };
     let (baseop, basehome) = (baseop.unwrap(), basehome.unwrap());
+    let launcher_home = Component::parse("org.unscroll.launcher/.MainActivity").unwrap();
     exec(
         adb,
         &s,
@@ -320,7 +312,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
     exec(
         adb,
         &s,
-        DeviceOperation::HomeSelect(l.clone()),
+        DeviceOperation::HomeSelect(launcher_home.clone()),
         "shell home selection",
         &mut o,
         &mut d,
@@ -333,7 +325,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     ))
-    .is_some_and(|x| home(&x).as_ref() == Some(&l));
+    .is_some_and(|x| x.trim() == launcher_home.as_str());
     o.last_mut().unwrap().1 = selected;
     exec(
         adb,
@@ -347,7 +339,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     );
-    let suspended = text(exec(
+    let suspension_verified = text(exec(
         adb,
         &s,
         DeviceOperation::PackageState {
@@ -358,8 +350,8 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     ))
-    .is_some_and(|x| state(&x, true));
-    o.last_mut().unwrap().1 = suspended;
+    .is_some_and(|x| suspended(&x, true));
+    o.last_mut().unwrap().1 = suspension_verified;
     exec(
         adb,
         &s,
@@ -451,7 +443,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     ))
-    .is_some_and(|x| state(&x, false));
+    .is_some_and(|x| suspended(&x, false));
     o.last_mut().unwrap().1 = unsuspended;
     exec(
         adb,
@@ -469,7 +461,7 @@ pub fn run(adb: &mut impl Adb, s: Serial, c: ProbeConfig) -> ProbeReport {
         &mut o,
         &mut d,
     ))
-    .is_some_and(|x| home(&x).as_ref() == Some(&basehome));
+    .is_some_and(|x| x.trim() == basehome.as_str());
     o.last_mut().unwrap().1 = homeok;
     let passed = o.iter().all(|(_, x)| *x);
     ProbeReport {

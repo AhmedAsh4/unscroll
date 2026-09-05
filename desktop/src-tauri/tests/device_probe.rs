@@ -96,8 +96,23 @@ fn failed_restore_is_a_failure_and_retains_local_diagnostics() {
 
     assert!(!report.passed());
     assert!(report.machine_json().contains("restore"));
-    assert!(!report.diagnostics().is_empty());
+    assert!(report.machine_json().contains("command_class"));
+    let directory = std::env::temp_dir().join("unscroll-probe-failed-restore-test");
+    report.write_local(&directory).unwrap();
+    assert!(fs::read_to_string(directory.join("probe-results.json"))
+        .unwrap()
+        .contains("command_class"));
+    let _ = fs::remove_dir_all(directory);
     assert!(report.summary().contains("diagnostic retained"));
+}
+
+#[test]
+fn parses_multifield_dumpsys_package_user_state() {
+    assert!(probe::suspended("Package [org.unscroll.fixture]\n  User 0: installed=true hidden=false suspended=true stopped=false", true));
+    assert!(probe::suspended(
+        "User 0: installed=true suspended=false enabled=0",
+        false
+    ));
 }
 
 #[test]

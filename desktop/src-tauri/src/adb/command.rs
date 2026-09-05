@@ -281,7 +281,7 @@ pub enum DeviceOperation {
         suspended: bool,
     },
     HomeResolve,
-    HomeSelect(PackageId),
+    HomeSelect(Component),
     HomeChooser,
     Bridge(BridgeOperation),
     ComponentInfo(Component),
