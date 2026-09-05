@@ -37,12 +37,7 @@ impl ProbeReport {
             .map(|(n, x)| format!("{{\"capability\":\"{n}\",\"passed\":{x}}}"))
             .collect::<Vec<_>>()
             .join(",");
-        let d = self
-            .diagnostics
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",");
+        let d = self.diagnostics.to_vec().join(",");
         format!("{{\"telemetry\":false,\"api\":\"{}\",\"model\":\"{}\",\"fingerprint\":\"{}\",\"outcomes\":[{o}],\"diagnostics\":[{d}],\"passed\":{}}}",self.api,self.model,self.fingerprint,self.passed)
     }
     pub fn summary(&self) -> String {
