@@ -3,7 +3,7 @@ mod parser;
 mod process;
 
 pub use command::{
-    AdbCommand, AppOp, AppOpMode, BridgeOperation, Component, Destination, DeviceOperation,
+    AdbCommand, AppOp, AppOpMode, BridgeOperation, Component, Cursor, Destination, DeviceOperation,
     Fingerprint, PackageId, Property, Serial, StreamId, UserId, ValidationError,
 };
 pub use parser::{parse_devices, DeviceRecord, DeviceStatus};

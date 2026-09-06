@@ -307,14 +307,40 @@ fn probe_commands_are_closed_validated_argument_arrays() {
             "--uri",
             "content://org.unscroll.launcher.bridge",
             "--method",
-            "recovery-v1",
+            "bridge-v1",
             "--extra",
-            "request:s:{\"operation\":\"health\",\"args\":{}}"
+            "string",
+            "request",
+            "{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}"
         ]
     );
     assert_eq!(
         AdbCommand::Device { serial, operation: DeviceOperation::Bridge(BridgeOperation::ReadIcon(icon)) }.arguments(),
-        vec!["-s", "emulator-5554", "shell", "content", "read", "--uri", "content://org.unscroll.launcher.bridge/recovery-v1/icon/0123456789abcdef0123456789abcdef"]
+        vec!["-s", "emulator-5554", "shell", "content", "read", "--uri", "content://org.unscroll.launcher.bridge/bridge-v1/icon/0123456789abcdef0123456789abcdef"]
+    );
+}
+
+#[test]
+fn bootstrap_commands_keep_install_and_cleanup_typed() {
+    let serial = Serial::parse("emulator-5554").unwrap();
+    let package = PackageId::parse("org.unscroll.launcher").unwrap();
+    assert_eq!(
+        AdbCommand::Install {
+            serial: serial.clone(),
+            apk: PathBuf::from("resources/unscroll-launcher.apk")
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "install",
+            "-r",
+            "resources/unscroll-launcher.apk"
+        ]
+    );
+    assert_eq!(
+        AdbCommand::Uninstall { serial, package }.arguments(),
+        vec!["-s", "emulator-5554", "uninstall", "org.unscroll.launcher"]
     );
 }
 

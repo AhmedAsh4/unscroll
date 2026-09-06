@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
@@ -167,6 +167,22 @@ impl StreamId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor(String);
+impl Cursor {
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+        (value.len() == 32
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        .then(|| Self(value.into()))
+        .ok_or(ValidationError::InvalidStreamId)
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination(String);
 impl Destination {
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
@@ -194,6 +210,7 @@ impl Destination {
 pub enum Property {
     SdkInt,
     Model,
+    Manufacturer,
     Fingerprint,
 }
 impl Property {
@@ -201,6 +218,7 @@ impl Property {
         match self {
             Self::SdkInt => "ro.build.version.sdk",
             Self::Model => "ro.product.model",
+            Self::Manufacturer => "ro.product.manufacturer",
             Self::Fingerprint => "ro.build.fingerprint",
         }
     }
@@ -216,6 +234,11 @@ pub enum BridgeOperation {
         device_serial: Serial,
         fingerprint: Fingerprint,
     },
+    CatalogNext {
+        device_serial: Serial,
+        fingerprint: Fingerprint,
+        cursor: Cursor,
+    },
     Icon {
         package: PackageId,
         component: Component,
@@ -230,15 +253,16 @@ impl BridgeOperation {
     fn arguments(&self) -> Vec<String> {
         const URI: &str = "content://org.unscroll.launcher.bridge";
         let request = match self {
-            Self::Health => Some("{\"operation\":\"health\",\"args\":{}}".into()),
-            Self::DeviceFacts { device_serial } => Some(format!("{{\"operation\":\"device_facts\",\"args\":{{\"serial\":\"{}\"}}}}", device_serial.as_str())),
-            Self::Catalog { device_serial, fingerprint } => Some(format!("{{\"operation\":\"catalog_page\",\"args\":{{\"page_size\":1,\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", device_serial.as_str(), fingerprint.as_str())),
+            Self::Health => Some("{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}".into()),
+            Self::DeviceFacts { device_serial } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"device_facts\",\"arguments\":{{\"serial\":\"{}\"}}}}", device_serial.as_str())),
+            Self::Catalog { device_serial, fingerprint } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"catalog_page\",\"arguments\":{{\"cursor\":null,\"page_size\":100,\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", device_serial.as_str(), fingerprint.as_str())),
+            Self::CatalogNext { device_serial, fingerprint, cursor } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"catalog_page\",\"arguments\":{{\"cursor\":\"{}\",\"page_size\":100,\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", cursor.as_str(), device_serial.as_str(), fingerprint.as_str())),
             Self::Icon { package, component } => {
                 let (_, activity) = component.as_str().split_once('/').expect("validated component");
-                Some(format!("{{\"operation\":\"icon_stream\",\"args\":{{\"package_id\":\"{}\",\"activity_name\":\"{}\",\"user_id\":0}}}}", package.as_str(), activity))
+                Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"icon_stream\",\"arguments\":{{\"package_id\":\"{}\",\"activity_name\":\"{}\",\"user_id\":0}}}}", package.as_str(), activity))
             }
-            Self::ReadEnvelope { device_serial, fingerprint } => Some(format!("{{\"operation\":\"read_envelope\",\"args\":{{\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", device_serial.as_str(), fingerprint.as_str())),
-            Self::ReadIcon(stream) => return vec!["content".into(), "read".into(), "--uri".into(), format!("{URI}/recovery-v1/icon/{}", stream.as_str())],
+            Self::ReadEnvelope { device_serial, fingerprint } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"read_envelope\",\"arguments\":{{\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", device_serial.as_str(), fingerprint.as_str())),
+            Self::ReadIcon(stream) => return vec!["content".into(), "read".into(), "--uri".into(), format!("{URI}/bridge-v1/icon/{}", stream.as_str())],
         };
         vec![
             "content".into(),
@@ -246,9 +270,11 @@ impl BridgeOperation {
             "--uri".into(),
             URI.into(),
             "--method".into(),
-            "recovery-v1".into(),
+            "bridge-v1".into(),
             "--extra".into(),
-            format!("request:s:{}", request.expect("call request")),
+            "string".into(),
+            "request".into(),
+            request.expect("call request"),
         ]
     }
 }
@@ -260,6 +286,9 @@ pub enum DeviceOperation {
         package: PackageId,
         user: UserId,
     },
+    PackageSigning {
+        package: PackageId,
+    },
     PackageState {
         package: PackageId,
         user: UserId,
@@ -269,6 +298,11 @@ pub enum DeviceOperation {
         user: UserId,
         app_op: AppOp,
     },
+    CurrentUser,
+    UserList,
+    PackageHelp,
+    SharedRecoveryDirectory,
+    InstallHandlers,
     AppOpSet {
         package: PackageId,
         user: UserId,
@@ -293,6 +327,14 @@ pub enum AdbCommand {
     StartServer,
     StopServer,
     Devices,
+    Install {
+        serial: Serial,
+        apk: PathBuf,
+    },
+    Uninstall {
+        serial: Serial,
+        package: PackageId,
+    },
     Device {
         serial: Serial,
         operation: DeviceOperation,
@@ -304,6 +346,19 @@ impl AdbCommand {
             Self::StartServer => vec!["start-server".into()],
             Self::StopServer => vec!["kill-server".into()],
             Self::Devices => vec!["devices".into(), "-l".into()],
+            Self::Install { serial, apk } => vec![
+                "-s".into(),
+                serial.0.clone(),
+                "install".into(),
+                "-r".into(),
+                apk.to_string_lossy().into_owned(),
+            ],
+            Self::Uninstall { serial, package } => vec![
+                "-s".into(),
+                serial.0.clone(),
+                "uninstall".into(),
+                package.0.clone(),
+            ],
             Self::Device { serial, operation } => {
                 let mut args = vec!["-s".into(), serial.0.clone(), "shell".into()];
                 match operation {
@@ -319,6 +374,9 @@ impl AdbCommand {
                         user.get().to_string(),
                         package.0.clone(),
                     ]),
+                    DeviceOperation::PackageSigning { package } => {
+                        args.extend(["dumpsys".into(), "package".into(), package.0.clone()])
+                    }
                     DeviceOperation::PackageState { package, user } => args.extend([
                         "dumpsys".into(),
                         "package".into(),
@@ -337,6 +395,30 @@ impl AdbCommand {
                         user.get().to_string(),
                         package.0.clone(),
                         app_op.0.clone(),
+                    ]),
+                    DeviceOperation::CurrentUser => {
+                        args.extend(["am".into(), "get-current-user".into()])
+                    }
+                    DeviceOperation::UserList => {
+                        args.extend(["cmd".into(), "user".into(), "list".into()])
+                    }
+                    DeviceOperation::PackageHelp => {
+                        args.extend(["cmd".into(), "package".into(), "help".into()])
+                    }
+                    DeviceOperation::SharedRecoveryDirectory => args.extend([
+                        "ls".into(),
+                        "-ld".into(),
+                        "/sdcard/Documents/Unscroll".into(),
+                    ]),
+                    DeviceOperation::InstallHandlers => args.extend([
+                        "cmd".into(),
+                        "package".into(),
+                        "query-activities".into(),
+                        "--brief".into(),
+                        "--user".into(),
+                        "0".into(),
+                        "-a".into(),
+                        "android.intent.action.INSTALL_PACKAGE".into(),
                     ]),
                     DeviceOperation::AppOpSet {
                         package,
@@ -430,6 +512,8 @@ impl AdbCommand {
             Self::StartServer => "server-start",
             Self::StopServer => "server-stop",
             Self::Devices => "device-discovery",
+            Self::Install { .. } => "launcher-install",
+            Self::Uninstall { .. } => "launcher-uninstall",
             Self::Device {
                 operation: DeviceOperation::GetProperty(_),
                 ..
@@ -439,6 +523,10 @@ impl AdbCommand {
                 ..
             } => "package-info",
             Self::Device {
+                operation: DeviceOperation::PackageSigning { .. },
+                ..
+            } => "package-signing",
+            Self::Device {
                 operation: DeviceOperation::PackageState { .. },
                 ..
             } => "package-state",
@@ -446,6 +534,26 @@ impl AdbCommand {
                 operation: DeviceOperation::AppOpGet { .. },
                 ..
             } => "app-op-get",
+            Self::Device {
+                operation: DeviceOperation::CurrentUser,
+                ..
+            } => "current-user",
+            Self::Device {
+                operation: DeviceOperation::UserList,
+                ..
+            } => "user-list",
+            Self::Device {
+                operation: DeviceOperation::PackageHelp,
+                ..
+            } => "package-help",
+            Self::Device {
+                operation: DeviceOperation::SharedRecoveryDirectory,
+                ..
+            } => "shared-recovery-directory",
+            Self::Device {
+                operation: DeviceOperation::InstallHandlers,
+                ..
+            } => "install-handlers",
             Self::Device {
                 operation: DeviceOperation::AppOpSet { .. },
                 ..
@@ -483,6 +591,7 @@ impl AdbCommand {
     pub fn serial(&self) -> Option<&Serial> {
         match self {
             Self::Device { serial, .. } => Some(serial),
+            Self::Install { serial, .. } | Self::Uninstall { serial, .. } => Some(serial),
             _ => None,
         }
     }

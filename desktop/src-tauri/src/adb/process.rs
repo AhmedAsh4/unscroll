@@ -1,4 +1,4 @@
-use super::{Adb, AdbCommand};
+use super::{Adb, AdbCommand, BridgeOperation, DeviceOperation};
 use std::{
     collections::VecDeque,
     io::Read,
@@ -11,9 +11,11 @@ use std::{
 use tauri::Manager;
 
 const MAX_CAPTURE_BYTES: usize = 65_536;
+const MAX_ICON_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdbOutput {
+    stdout_bytes: Vec<u8>,
     stdout: String,
     stderr: String,
     exit: Option<i32>,
@@ -41,6 +43,7 @@ impl AdbOutput {
         let (stdout, stdout_overflow) = Self::bounded(stdout);
         let (stderr, stderr_overflow) = Self::bounded(stderr);
         Self {
+            stdout_bytes: stdout.as_bytes().to_vec(),
             stdout,
             stderr,
             exit,
@@ -54,14 +57,22 @@ impl AdbOutput {
         exit: Option<i32>,
         timed_out: bool,
         overflow: bool,
+        binary: bool,
     ) -> Self {
-        Self::with_facts(
-            String::from_utf8_lossy(&stdout).into_owned(),
+        let stdout_text = if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&stdout).into_owned()
+        };
+        let mut result = Self::with_facts(
+            stdout_text,
             String::from_utf8_lossy(&stderr).into_owned(),
             exit,
             timed_out,
             overflow,
-        )
+        );
+        result.stdout_bytes = stdout;
+        result
     }
     pub fn success(stdout: impl Into<String>) -> Self {
         Self::with_facts(stdout.into(), String::new(), Some(0), false, false)
@@ -79,11 +90,26 @@ impl AdbOutput {
     pub fn timeout() -> Self {
         Self::with_facts(String::new(), String::new(), None, true, false)
     }
+    pub fn binary_success(stdout: Vec<u8>) -> Self {
+        let overflow = stdout.len() > MAX_ICON_BYTES;
+        let stdout_bytes = stdout.into_iter().take(MAX_ICON_BYTES).collect();
+        Self {
+            stdout_bytes,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit: Some(0),
+            timed_out: false,
+            overflow,
+        }
+    }
     pub fn overflow() -> Self {
         Self::with_facts(String::new(), String::new(), None, false, true)
     }
     pub fn stdout(&self) -> &str {
         &self.stdout
+    }
+    pub fn stdout_bytes(&self) -> &[u8] {
+        &self.stdout_bytes
     }
     pub fn stderr(&self) -> &str {
         &self.stderr
@@ -168,7 +194,10 @@ impl BundledAdb {
             .ok_or(AdbError::LaunchFailed)
     }
 }
-fn read_bounded<R: Read + Send + 'static>(mut stream: R) -> mpsc::Receiver<(Vec<u8>, bool)> {
+fn read_bounded<R: Read + Send + 'static>(
+    mut stream: R,
+    limit: usize,
+) -> mpsc::Receiver<(Vec<u8>, bool)> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -178,7 +207,7 @@ fn read_bounded<R: Read + Send + 'static>(mut stream: R) -> mpsc::Receiver<(Vec<
             if count == 0 {
                 break;
             }
-            let keep = MAX_CAPTURE_BYTES.saturating_sub(bytes.len()).min(count);
+            let keep = limit.saturating_sub(bytes.len()).min(count);
             bytes.extend_from_slice(&buffer[..keep]);
             overflow |= count > keep;
         }
@@ -194,9 +223,12 @@ mod tests {
 
     #[test]
     fn bounded_reader_retains_at_most_the_capture_limit_when_output_overflows() {
-        let (bytes, overflow) = read_bounded(Cursor::new(vec![b'x'; MAX_CAPTURE_BYTES + 1]))
-            .recv()
-            .expect("reader result");
+        let (bytes, overflow) = read_bounded(
+            Cursor::new(vec![b'x'; MAX_CAPTURE_BYTES + 1]),
+            MAX_CAPTURE_BYTES,
+        )
+        .recv()
+        .expect("reader result");
 
         assert_eq!(bytes.len(), MAX_CAPTURE_BYTES);
         assert!(overflow);
@@ -208,6 +240,7 @@ mod tests {
             vec![0xff; MAX_CAPTURE_BYTES],
             Vec::new(),
             Some(0),
+            false,
             false,
             false,
         );
@@ -226,8 +259,25 @@ impl Adb for BundledAdb {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| AdbError::LaunchFailed)?;
-        let stdout = read_bounded(child.stdout.take().ok_or(AdbError::LaunchFailed)?);
-        let stderr = read_bounded(child.stderr.take().ok_or(AdbError::LaunchFailed)?);
+        let binary = matches!(
+            command,
+            AdbCommand::Device {
+                operation: DeviceOperation::Bridge(BridgeOperation::ReadIcon(_)),
+                ..
+            }
+        );
+        let stdout = read_bounded(
+            child.stdout.take().ok_or(AdbError::LaunchFailed)?,
+            if binary {
+                MAX_ICON_BYTES
+            } else {
+                MAX_CAPTURE_BYTES
+            },
+        );
+        let stderr = read_bounded(
+            child.stderr.take().ok_or(AdbError::LaunchFailed)?,
+            MAX_CAPTURE_BYTES,
+        );
         let started = Instant::now();
         let mut timed_out = false;
         let status = loop {
@@ -249,6 +299,7 @@ impl Adb for BundledAdb {
             (!timed_out).then(|| status.code().unwrap_or(-1)),
             timed_out,
             stdout_overflow || stderr_overflow,
+            binary,
         ))
     }
 }
@@ -269,6 +320,9 @@ impl AdbResponse {
     }
     pub fn overflow() -> Self {
         Self::Output(AdbOutput::overflow())
+    }
+    pub fn binary_success(stdout: Vec<u8>) -> Self {
+        Self::Output(AdbOutput::binary_success(stdout))
     }
     pub fn ordinary_failure() -> Self {
         Self::Output(AdbOutput::failure(1, "ordinary failure"))

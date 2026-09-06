@@ -829,7 +829,7 @@ fn hex(value: u8) -> Result<u8, ValidationError> {
     }
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let mut h = [
         0x6a09e667u32,
         0xbb67ae85,
