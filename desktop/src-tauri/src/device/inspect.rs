@@ -30,6 +30,11 @@ pub enum XiaomiGuidance {
     Network,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XiaomiBootstrapState {
+    InstallRestricted,
+    SecurityDenied,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceSnapshot {
     pub serial: String,
     pub api: u32,
@@ -58,7 +63,10 @@ pub enum InspectionError {
     BridgeMismatch,
     RecoveryRequired,
     Preflight,
-    Xiaomi(Vec<XiaomiGuidance>),
+    Xiaomi {
+        state: XiaomiBootstrapState,
+        guidance: Vec<XiaomiGuidance>,
+    },
 }
 
 fn command(
@@ -183,11 +191,6 @@ fn handlers(value: &str) -> Vec<PackageId> {
 fn app_op_allowed(value: &str) -> bool {
     !value.contains(": ignore") && !value.contains(": deny")
 }
-fn signer_matches(value: &str, expected: &str) -> bool {
-    value
-        .lines()
-        .any(|line| line.trim().strip_prefix("signing_sha256=") == Some(expected))
-}
 fn xiaomi_guidance() -> Vec<XiaomiGuidance> {
     vec![
         XiaomiGuidance::InstallViaUsb,
@@ -195,6 +198,22 @@ fn xiaomi_guidance() -> Vec<XiaomiGuidance> {
         XiaomiGuidance::Sim,
         XiaomiGuidance::Network,
     ]
+}
+fn xiaomi_bootstrap(manufacturer: &str, output: &str) -> Option<XiaomiBootstrapState> {
+    let output = output.to_ascii_lowercase();
+    let xiaomi = manufacturer.to_ascii_lowercase().contains("xiaomi")
+        || output.contains("miui")
+        || output.contains("hyperos");
+    if !xiaomi {
+        return None;
+    }
+    if output.contains("install_failed_user_restricted") {
+        Some(XiaomiBootstrapState::InstallRestricted)
+    } else if output.contains("securityexception") {
+        Some(XiaomiBootstrapState::SecurityDenied)
+    } else {
+        None
+    }
 }
 
 /// Preflight's only permissible pre-baseline mutation is a non-activating launcher install.
@@ -262,12 +281,13 @@ pub fn inspect(
             Err(error) => {
                 return Err(match &error {
                     AdbError::NonZero(output)
-                        if output.stderr().contains("INSTALL_FAILED_USER_RESTRICTED") =>
+                        if xiaomi_bootstrap(&manufacturer, output.stderr()).is_some() =>
                     {
-                        InspectionError::Xiaomi(xiaomi_guidance())
-                    }
-                    AdbError::NonZero(output) if output.stderr().contains("SecurityException") => {
-                        InspectionError::Xiaomi(xiaomi_guidance())
+                        InspectionError::Xiaomi {
+                            state: xiaomi_bootstrap(&manufacturer, output.stderr())
+                                .expect("checked"),
+                            guidance: xiaomi_guidance(),
+                        }
                     }
                     _ => InspectionError::Bootstrap,
                 })
@@ -275,20 +295,15 @@ pub fn inspect(
         }
     }
     let result = (|| {
-        let signature = read(
-            adb,
-            &serial,
-            DeviceOperation::PackageSigning { package: package() },
-        )?;
-        if !signer_matches(&signature, artifact.signing_sha256()) {
-            return Err(InspectionError::SignatureMismatch);
-        }
         let health = read(
             adb,
             &serial,
             DeviceOperation::Bridge(BridgeOperation::Health),
         )?;
-        catalog::health(&health).map_err(|_| InspectionError::BridgeMismatch)?;
+        let signer = catalog::health(&health).map_err(|_| InspectionError::BridgeMismatch)?;
+        if signer != artifact.signing_sha256() {
+            return Err(InspectionError::SignatureMismatch);
+        }
         let facts_text = read(
             adb,
             &serial,

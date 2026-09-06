@@ -51,20 +51,30 @@ pub(crate) enum BridgeReply {
     Value(Json),
 }
 
-pub(crate) fn health(text: &str) -> Result<(), ()> {
+pub(crate) fn health(text: &str) -> Result<String, ()> {
     let result = reply(text)?;
     let Json::Object(result) = result else {
         return Err(());
     };
     exact(
         &result,
-        &["launcher_package", "protocol_version", "recovery_schema"],
+        &[
+            "launcher_package",
+            "launcher_signing_sha256",
+            "protocol_version",
+            "recovery_schema",
+        ],
     )?;
+    let signer = string(&result, "launcher_signing_sha256")?;
     (string(&result, "launcher_package")? == "org.unscroll.launcher"
         && string(&result, "protocol_version")? == "bridge-v1"
-        && string(&result, "recovery_schema")? == "recovery-v1")
-        .then_some(())
-        .ok_or(())
+        && string(&result, "recovery_schema")? == "recovery-v1"
+        && signer.len() == 64
+        && signer
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| signer.to_owned())
+    .ok_or(())
 }
 
 pub(crate) fn facts(

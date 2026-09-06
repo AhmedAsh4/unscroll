@@ -3,7 +3,7 @@ use unscroll_desktop_lib::{
     adb::{AdbCommand, AdbResponse, FakeAdb},
     device::{inspect, InspectionError, LauncherArtifact, RecoveryObservation},
     recovery::shared_copy::{
-        bounded_read, destination, MAX_SHARED_COPY_BYTES, SHARED_RECOVERY_PATH,
+        bounded_read, destination, write_from, MAX_SHARED_COPY_BYTES, SHARED_RECOVERY_PATH,
     },
 };
 
@@ -16,7 +16,7 @@ fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
             .unwrap()
             .as_nanos()
     ));
-    fs::write(&path, b"fixture").unwrap();
+    fs::write(&path, b"PK\x03\x04fixture").unwrap();
     let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).unwrap();
     (path, artifact)
 }
@@ -30,6 +30,20 @@ fn absent_artifact_fails_before_any_adb_command() {
     );
     assert!(adb.seen().is_empty());
     assert!(LauncherArtifact::from_path("missing.apk", "a".repeat(64)).is_err());
+}
+
+#[test]
+fn non_apk_bytes_fail_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!("unscroll-not-apk-{}.apk", std::process::id()));
+    fs::write(&path, b"fixture").unwrap();
+    assert!(LauncherArtifact::from_path(&path, "a".repeat(64)).is_err());
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, None),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -49,6 +63,28 @@ fn shared_recovery_reads_are_fixed_path_and_bounded() {
     assert_eq!(destination().as_str(), SHARED_RECOVERY_PATH);
     assert!(bounded_read(&vec![0; MAX_SHARED_COPY_BYTES]).is_ok());
     assert!(bounded_read(&vec![0; MAX_SHARED_COPY_BYTES + 1]).is_err());
+}
+
+#[test]
+fn shared_recovery_write_uses_only_the_fixed_temp_then_commit() {
+    let source =
+        std::env::temp_dir().join(format!("unscroll-recovery-{}.json", std::process::id()));
+    fs::write(&source, b"{}").unwrap();
+    let serial = unscroll_desktop_lib::adb::Serial::parse("A").unwrap();
+    let mut adb = FakeAdb::scripted([AdbResponse::success(""), AdbResponse::success("")]);
+    write_from(&mut adb, &serial, &source).unwrap();
+    assert!(matches!(
+        adb.seen()[0],
+        AdbCommand::PushSharedRecovery { .. }
+    ));
+    assert!(matches!(
+        adb.seen()[1],
+        AdbCommand::Device {
+            operation: unscroll_desktop_lib::adb::DeviceOperation::CommitSharedRecovery,
+            ..
+        }
+    ));
+    fs::remove_file(source).unwrap();
 }
 
 #[test]
@@ -132,18 +168,45 @@ fn missing_shared_storage_and_miui_install_failures_do_not_change_existing_state
     ]);
     assert_eq!(
         inspect(&mut miui, Some(launcher)),
-        Err(InspectionError::Xiaomi(vec![
-            unscroll_desktop_lib::device::XiaomiGuidance::InstallViaUsb,
-            unscroll_desktop_lib::device::XiaomiGuidance::MiAccount,
-            unscroll_desktop_lib::device::XiaomiGuidance::Sim,
-            unscroll_desktop_lib::device::XiaomiGuidance::Network,
-        ]))
+        Err(InspectionError::Xiaomi {
+            state: unscroll_desktop_lib::device::XiaomiBootstrapState::InstallRestricted,
+            guidance: vec![
+                unscroll_desktop_lib::device::XiaomiGuidance::InstallViaUsb,
+                unscroll_desktop_lib::device::XiaomiGuidance::MiAccount,
+                unscroll_desktop_lib::device::XiaomiGuidance::Sim,
+                unscroll_desktop_lib::device::XiaomiGuidance::Network,
+            ],
+        })
     );
     assert!(!miui
         .seen()
         .iter()
         .any(|command| matches!(command, AdbCommand::Uninstall { .. })));
     fs::remove_file(path2).unwrap();
+}
+
+#[test]
+fn non_xiaomi_security_failure_is_not_rewritten_as_xiaomi_guidance() {
+    let (path, artifact) = artifact();
+    let mut adb = FakeAdb::scripted([
+        AdbResponse::success(""),
+        AdbResponse::success("List of devices attached\nA\tdevice\n"),
+        AdbResponse::success("34"),
+        AdbResponse::success("Pixel"),
+        AdbResponse::success("Google"),
+        AdbResponse::success("google/pixel/release"),
+        AdbResponse::success("0"),
+        AdbResponse::success("com.android.launcher/.Home"),
+        AdbResponse::success("package help suspend unsuspend set-home-activity"),
+        AdbResponse::success("/sdcard/Documents/Unscroll"),
+        AdbResponse::success(""),
+        AdbResponse::failure(1, "", "SecurityException"),
+    ]);
+    assert_eq!(
+        inspect(&mut adb, Some(artifact)),
+        Err(InspectionError::Bootstrap)
+    );
+    fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -162,9 +225,8 @@ fn cleanup_only_uninstalls_the_launcher_installed_by_this_run() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success(
-            r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher"}}}]"#,
+            r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher","launcher_signing_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]"#,
         ),
     ]);
     assert_eq!(
@@ -193,7 +255,6 @@ fn existing_launcher_is_never_uninstalled_after_a_preflight_failure() {
         AdbResponse::success("package help suspend unsuspend set-home-activity"),
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success("package:org.unscroll.launcher"),
-        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success("not bridge json"),
     ]);
     assert_eq!(
@@ -223,7 +284,9 @@ fn launcher_signature_mismatch_cleans_up_only_a_bootstrap_install() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("signing_sha256=".to_owned() + &"b".repeat(64)),
+        AdbResponse::success(
+            r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher","launcher_signing_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}]"#,
+        ),
     ]);
     assert_eq!(
         inspect(&mut adb, Some(artifact)),
@@ -255,7 +318,9 @@ fn launcher_in_any_profile_is_never_bootstrapped_or_uninstalled() {
         AdbResponse::success("package help suspend unsuspend set-home-activity"),
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success("package:org.unscroll.launcher"),
-        AdbResponse::success("signing_sha256=not-the-pinned-signer"),
+        AdbResponse::success(
+            r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher","launcher_signing_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}]"#,
+        ),
     ]);
     assert_eq!(
         inspect(&mut adb, Some(artifact)),
@@ -269,7 +334,7 @@ fn launcher_in_any_profile_is_never_bootstrapped_or_uninstalled() {
 }
 
 #[test]
-fn signer_digest_requires_an_exact_field_match() {
+fn malformed_bridge_signer_field_is_rejected_before_comparison() {
     let (path, artifact) = artifact();
     let digest = "a".repeat(64);
     let mut adb = FakeAdb::scripted([
@@ -285,11 +350,13 @@ fn signer_digest_requires_an_exact_field_match() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success(format!("other={digest}x")),
+        AdbResponse::success(format!(
+            r#"Result: Bundle[{{response={{"protocol_version":"bridge-v1","ok":true,"result":{{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher","launcher_signing_sha256":"{digest}x"}}}}}}]"#
+        )),
     ]);
     assert_eq!(
         inspect(&mut adb, Some(artifact)),
-        Err(InspectionError::SignatureMismatch)
+        Err(InspectionError::BridgeMismatch)
     );
     assert!(adb
         .seen()
@@ -301,7 +368,7 @@ fn signer_digest_requires_an_exact_field_match() {
 #[test]
 fn inspection_collects_a_typed_snapshot_without_mutating_existing_state() {
     let (path, artifact) = artifact();
-    let health = r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher"}}}]"#;
+    let health = r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher","launcher_signing_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]"#;
     let facts = r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"device_binding":{"serial":"R58M1234ABC","fingerprint":"google/pixel/release","user_id":0},"capabilities":{"app_ops":true,"home_selection":true,"package_suspension":true,"recovery_storage":true}}}}]"#;
     let catalog = r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"entries":[{"package_id":"com.example.camera","activity_name":"com.example.camera.MainActivity","label":"Camera","user_id":0,"launchable":true,"enabled":true,"suspended":false,"activity_icon_available":true,"application_icon_available":true,"icon_available":true,"protected_reason":null},{"package_id":"com.android.settings","activity_name":"com.android.settings.Settings","label":"Settings","user_id":0,"launchable":true,"enabled":true,"suspended":false,"activity_icon_available":false,"application_icon_available":false,"icon_available":false,"protected_reason":"Settings"}],"next_cursor":null}}}]"#;
     let icon = r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"byte_length":8,"mime_type":"image/png","sha256":"4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6","stream_id":"0123456789abcdef0123456789abcdef"}}}]"#;
@@ -318,7 +385,6 @@ fn inspection_collects_a_typed_snapshot_without_mutating_existing_state() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success(health),
         AdbResponse::success(facts),
         AdbResponse::success(catalog),

@@ -290,9 +290,6 @@ pub enum DeviceOperation {
     PackageAnyUser {
         package: PackageId,
     },
-    PackageSigning {
-        package: PackageId,
-    },
     PackageState {
         package: PackageId,
         user: UserId,
@@ -306,6 +303,7 @@ pub enum DeviceOperation {
     UserList,
     PackageHelp,
     SharedRecoveryDirectory,
+    CommitSharedRecovery,
     InstallHandlers,
     AppOpSet {
         package: PackageId,
@@ -341,6 +339,10 @@ pub enum AdbCommand {
         user: UserId,
         package: PackageId,
     },
+    PushSharedRecovery {
+        serial: Serial,
+        source: PathBuf,
+    },
     Device {
         serial: Serial,
         operation: DeviceOperation,
@@ -373,6 +375,13 @@ impl AdbCommand {
                 user.get().to_string(),
                 package.0.clone(),
             ],
+            Self::PushSharedRecovery { serial, source } => vec![
+                "-s".into(),
+                serial.0.clone(),
+                "push".into(),
+                source.to_string_lossy().into_owned(),
+                "/sdcard/Documents/Unscroll/recovery-v1.json.tmp".into(),
+            ],
             Self::Device { serial, operation } => {
                 let mut args = vec!["-s".into(), serial.0.clone(), "shell".into()];
                 match operation {
@@ -388,9 +397,6 @@ impl AdbCommand {
                         user.get().to_string(),
                         package.0.clone(),
                     ]),
-                    DeviceOperation::PackageSigning { package } => {
-                        args.extend(["dumpsys".into(), "package".into(), package.0.clone()])
-                    }
                     DeviceOperation::PackageAnyUser { package } => args.extend([
                         "cmd".into(),
                         "package".into(),
@@ -432,6 +438,11 @@ impl AdbCommand {
                         "ls".into(),
                         "-ld".into(),
                         "/sdcard/Documents/Unscroll".into(),
+                    ]),
+                    DeviceOperation::CommitSharedRecovery => args.extend([
+                        "mv".into(),
+                        "/sdcard/Documents/Unscroll/recovery-v1.json.tmp".into(),
+                        "/sdcard/Documents/Unscroll/recovery-v1.json".into(),
                     ]),
                     DeviceOperation::InstallHandlers => args.extend([
                         "cmd".into(),
@@ -537,6 +548,7 @@ impl AdbCommand {
             Self::Devices => "device-discovery",
             Self::Install { .. } => "launcher-install",
             Self::Uninstall { .. } => "launcher-uninstall",
+            Self::PushSharedRecovery { .. } => "shared-recovery-push",
             Self::Device {
                 operation: DeviceOperation::GetProperty(_),
                 ..
@@ -545,10 +557,6 @@ impl AdbCommand {
                 operation: DeviceOperation::PackageInfo { .. },
                 ..
             } => "package-info",
-            Self::Device {
-                operation: DeviceOperation::PackageSigning { .. },
-                ..
-            } => "package-signing",
             Self::Device {
                 operation: DeviceOperation::PackageAnyUser { .. },
                 ..
@@ -577,6 +585,10 @@ impl AdbCommand {
                 operation: DeviceOperation::SharedRecoveryDirectory,
                 ..
             } => "shared-recovery-directory",
+            Self::Device {
+                operation: DeviceOperation::CommitSharedRecovery,
+                ..
+            } => "shared-recovery-commit",
             Self::Device {
                 operation: DeviceOperation::InstallHandlers,
                 ..
@@ -618,7 +630,9 @@ impl AdbCommand {
     pub fn serial(&self) -> Option<&Serial> {
         match self {
             Self::Device { serial, .. } => Some(serial),
-            Self::Install { serial, .. } | Self::Uninstall { serial, .. } => Some(serial),
+            Self::Install { serial, .. }
+            | Self::Uninstall { serial, .. }
+            | Self::PushSharedRecovery { serial, .. } => Some(serial),
             _ => None,
         }
     }

@@ -51,7 +51,7 @@ lowercase 32-character hexadecimal string; null is allowed only where stated.
 
 | operation | exact `arguments` object | exact success `result` object |
 | --- | --- | --- |
-| `health` | empty object | exactly `protocol_version`, `recovery_schema`, `launcher_package`; values are `bridge-v1`, `recovery-v1`, package ID |
+| `health` | empty object | exactly `protocol_version`, `recovery_schema`, `launcher_package`, `launcher_signing_sha256`; values are `bridge-v1`, `recovery-v1`, package ID, and the launcher's lowercase SHA-256 signing-certificate digest |
 | `device_facts` | exactly `serial`; the ADB shell-selected serial string | exactly `device_binding`, `capabilities` using the shared shapes |
 | `catalog_page` | exactly `cursor`, `page_size`; cursor is null or cursor, page size is integer 1–100 | exactly `entries`, `next_cursor`; entries is 0–100 catalog entries, next cursor is null or cursor |
 | `icon_stream` | exactly `package_id`, `activity_name`, `user_id` | exactly `byte_length`, `mime_type`, `sha256`, `stream_id`; length is 1–1048576, MIME is `image/png`, hash is 64 lowercase hex, stream ID follows shared shape |

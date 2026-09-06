@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.os.Process
 import android.os.Binder
 import android.os.UserHandle
+import android.os.Build
 import org.unscroll.launcher.catalog.AppCatalog
 import org.unscroll.launcher.catalog.DeviceFactsProvider
 import org.unscroll.launcher.catalog.IconStream
@@ -24,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
 
 class UnscrollProvider : ContentProvider() {
     private data class Snapshot(val entries: List<org.unscroll.launcher.catalog.CatalogEntry>, val offset: Int, val expiresAt: Long, val binding: org.unscroll.launcher.recovery.RecoveryDeviceBinding)
@@ -50,7 +52,7 @@ class UnscrollProvider : ContentProvider() {
     private fun handle(request: BridgeRequest): String {
         val app = context ?: throw BridgeException(BridgeError.INTERNAL)
         return when (request.operation) {
-            "health" -> { BridgeProtocol.objectArgs(request, emptySet()); BridgeProtocol.response(mapOf("protocol_version" to BridgeProtocol.VERSION, "recovery_schema" to "recovery-v1", "launcher_package" to app.packageName)) }
+            "health" -> { BridgeProtocol.objectArgs(request, emptySet()); BridgeProtocol.response(mapOf("protocol_version" to BridgeProtocol.VERSION, "recovery_schema" to "recovery-v1", "launcher_package" to app.packageName, "launcher_signing_sha256" to signingSha256(app.packageManager, app.packageName))) }
             "device_facts" -> { val serial = BridgeProtocol.string(BridgeProtocol.objectArgs(request, setOf("serial"))["serial"]); val facts = DeviceFactsProvider.current(serial); val binding = facts.binding ?: throw BridgeException(BridgeError.DEVICE_MISMATCH); BridgeProtocol.response(mapOf("device_binding" to mapOf("serial" to binding.serial, "fingerprint" to binding.fingerprint, "user_id" to binding.userId), "capabilities" to mapOf("app_ops" to facts.capabilities.appOps, "home_selection" to facts.capabilities.homeSelection, "package_suspension" to facts.capabilities.packageSuspension, "recovery_storage" to facts.capabilities.recoveryStorage))) }
             "catalog_page" -> catalog(app, request, 0)
             "icon_stream" -> icon(app, request, 0)
@@ -120,6 +122,15 @@ class UnscrollProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
     private fun token(): String = ByteArray(16).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
     private fun binding(value: Any?): org.unscroll.launcher.recovery.RecoveryDeviceBinding { val supplied = value as? Map<*, *> ?: throw BridgeException(BridgeError.INVALID_REQUEST); val serial = BridgeProtocol.boundedString(supplied["serial"]); val binding = DeviceFactsProvider.current(serial).binding ?: throw BridgeException(BridgeError.DEVICE_MISMATCH); if (supplied != mapOf("serial" to binding.serial, "fingerprint" to binding.fingerprint, "user_id" to binding.userId)) throw BridgeException(BridgeError.DEVICE_MISMATCH); return binding }
+    private fun signingSha256(pm: PackageManager, packageName: String): String {
+        val certificate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES).signingInfo?.apkContentsSigners?.singleOrNull()?.toByteArray()
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES).signatures?.singleOrNull()?.toByteArray()
+        }
+        return certificate?.let { MessageDigest.getInstance("SHA-256").digest(it).joinToString("") { byte -> "%02x".format(byte) } } ?: throw BridgeException(BridgeError.INTERNAL)
+    }
     private fun isPrimaryUser(): Boolean = Process.myUserHandle() == UserHandle.getUserHandleForUid(0)
     private fun cleanup() { val now = System.currentTimeMillis(); pages.entries.removeIf { it.value.expiresAt < now }; streams.entries.removeIf { it.value.expiresAt < now } }
     private companion object { const val MAX_PAGES = 32; const val MAX_STREAMS = 8; const val MAX_STREAM_BYTES = 4 * IconStream.MAX_BYTES; const val MAX_CATALOG_ENTRIES = 1_000; const val TTL = 300_000L }

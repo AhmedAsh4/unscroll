@@ -13,5 +13,6 @@ pub use discovery::{discover, Discovery};
 pub use errors::{classify_bootstrap, classify_transport, BootstrapError, DiscoveryError};
 pub use identity::{classify_api, ApiSupport, DeviceIdentity};
 pub use inspect::{
-    inspect, DeviceSnapshot, InspectionError, ProfileFact, RecoveryObservation, XiaomiGuidance,
+    inspect, DeviceSnapshot, InspectionError, ProfileFact, RecoveryObservation,
+    XiaomiBootstrapState, XiaomiGuidance,
 };

@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 const SHA256_HEX: usize = 64;
 
@@ -41,6 +45,15 @@ impl LauncherArtifact {
 }
 fn valid(path: &Path, signing_sha256: &str) -> bool {
     path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|metadata| (4..=100 * 1024 * 1024).contains(&metadata.len()))
+        && File::open(path)
+            .and_then(|mut file| {
+                let mut magic = [0; 4];
+                file.read_exact(&mut magic).map(|_| magic)
+            })
+            .is_ok_and(|magic| magic == *b"PK\x03\x04")
         && signing_sha256.len() == SHA256_HEX
         && signing_sha256
             .bytes()
