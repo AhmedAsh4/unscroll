@@ -1,8 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 use unscroll_desktop_lib::adb::{
     parse_devices, redacted_diagnostic, require_success, stop_server, AdbCommand, AdbError,
-    AdbOutput, AdbResponse, AppOp, AppOpMode, BridgeOperation, BundledAdb, Component, Destination,
-    DeviceOperation, FakeAdb, PackageId, Property, Serial, StreamId, UserId,
+    AdbOutput, AdbResponse, AppOp, AppOpMode, BridgeOperation, BundledAdb, Component, Cursor,
+    Destination, DeviceOperation, FakeAdb, PackageId, Property, Serial, StreamId, UserId,
+    ValidationError,
 };
 use unscroll_desktop_lib::device::{
     classify_api, classify_bootstrap, discover, ApiSupport, BootstrapError, Discovery,
@@ -327,6 +328,7 @@ fn bootstrap_commands_keep_install_and_cleanup_typed() {
     assert_eq!(
         AdbCommand::Install {
             serial: serial.clone(),
+            user: UserId::parse(0).unwrap(),
             apk: PathBuf::from("resources/unscroll-launcher.apk")
         }
         .arguments(),
@@ -335,12 +337,51 @@ fn bootstrap_commands_keep_install_and_cleanup_typed() {
             "emulator-5554",
             "install",
             "-r",
+            "--user",
+            "0",
             "resources/unscroll-launcher.apk"
         ]
     );
     assert_eq!(
-        AdbCommand::Uninstall { serial, package }.arguments(),
-        vec!["-s", "emulator-5554", "uninstall", "org.unscroll.launcher"]
+        AdbCommand::Uninstall {
+            serial,
+            user: UserId::parse(0).unwrap(),
+            package
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "uninstall",
+            "--user",
+            "0",
+            "org.unscroll.launcher"
+        ]
+    );
+    assert_eq!(
+        Cursor::parse("not-a-cursor"),
+        Err(ValidationError::InvalidCursor)
+    );
+    assert_eq!(
+        AdbCommand::Device {
+            serial: Serial::parse("emulator-5554").unwrap(),
+            operation: DeviceOperation::PackageAnyUser {
+                package: PackageId::parse("org.unscroll.launcher").unwrap(),
+            },
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "shell",
+            "cmd",
+            "package",
+            "list",
+            "packages",
+            "--user",
+            "all",
+            "org.unscroll.launcher"
+        ]
     );
 }
 

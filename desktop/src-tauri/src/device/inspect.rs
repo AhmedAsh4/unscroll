@@ -25,7 +25,9 @@ pub struct ProfileFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XiaomiGuidance {
     InstallViaUsb,
-    MiAccountSimAndNetwork,
+    MiAccount,
+    Sim,
+    Network,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceSnapshot {
@@ -43,7 +45,7 @@ pub struct DeviceSnapshot {
     pub profiles: Vec<ProfileFact>,
     pub private_recovery: RecoveryObservation,
     pub shared_recovery: RecoveryObservation,
-    pub xiaomi_guidance: Option<XiaomiGuidance>,
+    pub xiaomi_guidance: Vec<XiaomiGuidance>,
     pub capabilities: CapabilityReport,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +58,7 @@ pub enum InspectionError {
     BridgeMismatch,
     RecoveryRequired,
     Preflight,
-    Xiaomi(XiaomiGuidance),
+    Xiaomi(Vec<XiaomiGuidance>),
 }
 
 fn command(
@@ -136,14 +138,15 @@ fn shared_recovery_read(
 ) -> Result<RecoveryObservation, InspectionError> {
     match adb.execute(AdbCommand::Device {
         serial: serial.clone(),
-        operation: DeviceOperation::ReadDestination(
-            crate::adb::Destination::parse(crate::recovery::shared_copy::SHARED_RECOVERY_PATH)
-                .expect("constant destination"),
-        ),
+        operation: DeviceOperation::ReadDestination(crate::recovery::shared_copy::destination()),
     }) {
         Ok(output) => match require_success(output) {
             Ok(output) => crate::recovery::model::RecoveryEnvelopeV1::parse_for_device(
-                output.stdout(),
+                std::str::from_utf8(
+                    crate::recovery::shared_copy::bounded_read(output.stdout_bytes())
+                        .map_err(|_| InspectionError::Preflight)?,
+                )
+                .map_err(|_| InspectionError::Preflight)?,
                 serial.as_str(),
                 fingerprint.as_str(),
                 0,
@@ -180,6 +183,19 @@ fn handlers(value: &str) -> Vec<PackageId> {
 fn app_op_allowed(value: &str) -> bool {
     !value.contains(": ignore") && !value.contains(": deny")
 }
+fn signer_matches(value: &str, expected: &str) -> bool {
+    value
+        .lines()
+        .any(|line| line.trim().strip_prefix("signing_sha256=") == Some(expected))
+}
+fn xiaomi_guidance() -> Vec<XiaomiGuidance> {
+    vec![
+        XiaomiGuidance::InstallViaUsb,
+        XiaomiGuidance::MiAccount,
+        XiaomiGuidance::Sim,
+        XiaomiGuidance::Network,
+    ]
+}
 
 /// Preflight's only permissible pre-baseline mutation is a non-activating launcher install.
 pub fn inspect(
@@ -187,6 +203,9 @@ pub fn inspect(
     artifact: Option<LauncherArtifact>,
 ) -> Result<DeviceSnapshot, InspectionError> {
     let artifact = artifact.ok_or(InspectionError::LauncherArtifactUnavailable)?;
+    artifact
+        .validate()
+        .map_err(|_| InspectionError::LauncherArtifactUnavailable)?;
     let Discovery::One { serial } = discover(adb).map_err(|_| InspectionError::Discovery)?;
     let api = read(adb, &serial, DeviceOperation::GetProperty(Property::SdkInt))?
         .parse()
@@ -225,10 +244,7 @@ pub fn inspect(
     let existing = read(
         adb,
         &serial,
-        DeviceOperation::PackageInfo {
-            package: package(),
-            user: user(),
-        },
+        DeviceOperation::PackageAnyUser { package: package() },
     )?;
     let installed_here = !existing
         .lines()
@@ -237,7 +253,8 @@ pub fn inspect(
         match require_success(
             adb.execute(AdbCommand::Install {
                 serial: serial.clone(),
-                apk: artifact.path.clone(),
+                user: user(),
+                apk: artifact.path().into(),
             })
             .map_err(|_| InspectionError::Bootstrap)?,
         ) {
@@ -247,10 +264,10 @@ pub fn inspect(
                     AdbError::NonZero(output)
                         if output.stderr().contains("INSTALL_FAILED_USER_RESTRICTED") =>
                     {
-                        InspectionError::Xiaomi(XiaomiGuidance::InstallViaUsb)
+                        InspectionError::Xiaomi(xiaomi_guidance())
                     }
                     AdbError::NonZero(output) if output.stderr().contains("SecurityException") => {
-                        InspectionError::Xiaomi(XiaomiGuidance::MiAccountSimAndNetwork)
+                        InspectionError::Xiaomi(xiaomi_guidance())
                     }
                     _ => InspectionError::Bootstrap,
                 })
@@ -263,7 +280,7 @@ pub fn inspect(
             &serial,
             DeviceOperation::PackageSigning { package: package() },
         )?;
-        if !signature.contains(&artifact.signing_sha256) {
+        if !signer_matches(&signature, artifact.signing_sha256()) {
             return Err(InspectionError::SignatureMismatch);
         }
         let health = read(
@@ -400,15 +417,14 @@ pub fn inspect(
             profiles: profile_facts,
             private_recovery,
             shared_recovery,
-            xiaomi_guidance: manufacturer
-                .eq_ignore_ascii_case("xiaomi")
-                .then_some(XiaomiGuidance::InstallViaUsb),
+            xiaomi_guidance: Vec::new(),
             capabilities,
         })
     })();
     if result.is_err() && installed_here {
         let _ = adb.execute(AdbCommand::Uninstall {
             serial,
+            user: user(),
             package: package(),
         });
     }

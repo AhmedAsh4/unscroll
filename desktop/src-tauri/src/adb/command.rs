@@ -10,6 +10,7 @@ pub enum ValidationError {
     InvalidDestination,
     InvalidFingerprint,
     InvalidStreamId,
+    InvalidCursor,
 }
 fn safe(value: &str, max: usize, allowed: impl Fn(u8, usize) -> bool) -> bool {
     !value.is_empty()
@@ -175,7 +176,7 @@ impl Cursor {
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
         .then(|| Self(value.into()))
-        .ok_or(ValidationError::InvalidStreamId)
+        .ok_or(ValidationError::InvalidCursor)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -286,6 +287,9 @@ pub enum DeviceOperation {
         package: PackageId,
         user: UserId,
     },
+    PackageAnyUser {
+        package: PackageId,
+    },
     PackageSigning {
         package: PackageId,
     },
@@ -329,10 +333,12 @@ pub enum AdbCommand {
     Devices,
     Install {
         serial: Serial,
+        user: UserId,
         apk: PathBuf,
     },
     Uninstall {
         serial: Serial,
+        user: UserId,
         package: PackageId,
     },
     Device {
@@ -346,17 +352,25 @@ impl AdbCommand {
             Self::StartServer => vec!["start-server".into()],
             Self::StopServer => vec!["kill-server".into()],
             Self::Devices => vec!["devices".into(), "-l".into()],
-            Self::Install { serial, apk } => vec![
+            Self::Install { serial, user, apk } => vec![
                 "-s".into(),
                 serial.0.clone(),
                 "install".into(),
                 "-r".into(),
+                "--user".into(),
+                user.get().to_string(),
                 apk.to_string_lossy().into_owned(),
             ],
-            Self::Uninstall { serial, package } => vec![
+            Self::Uninstall {
+                serial,
+                user,
+                package,
+            } => vec![
                 "-s".into(),
                 serial.0.clone(),
                 "uninstall".into(),
+                "--user".into(),
+                user.get().to_string(),
                 package.0.clone(),
             ],
             Self::Device { serial, operation } => {
@@ -377,6 +391,15 @@ impl AdbCommand {
                     DeviceOperation::PackageSigning { package } => {
                         args.extend(["dumpsys".into(), "package".into(), package.0.clone()])
                     }
+                    DeviceOperation::PackageAnyUser { package } => args.extend([
+                        "cmd".into(),
+                        "package".into(),
+                        "list".into(),
+                        "packages".into(),
+                        "--user".into(),
+                        "all".into(),
+                        package.0.clone(),
+                    ]),
                     DeviceOperation::PackageState { package, user } => args.extend([
                         "dumpsys".into(),
                         "package".into(),
@@ -526,6 +549,10 @@ impl AdbCommand {
                 operation: DeviceOperation::PackageSigning { .. },
                 ..
             } => "package-signing",
+            Self::Device {
+                operation: DeviceOperation::PackageAnyUser { .. },
+                ..
+            } => "package-any-user",
             Self::Device {
                 operation: DeviceOperation::PackageState { .. },
                 ..

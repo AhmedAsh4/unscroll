@@ -2,6 +2,9 @@ use std::fs;
 use unscroll_desktop_lib::{
     adb::{AdbCommand, AdbResponse, FakeAdb},
     device::{inspect, InspectionError, LauncherArtifact, RecoveryObservation},
+    recovery::shared_copy::{
+        bounded_read, destination, MAX_SHARED_COPY_BYTES, SHARED_RECOVERY_PATH,
+    },
 };
 
 fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
@@ -27,6 +30,25 @@ fn absent_artifact_fails_before_any_adb_command() {
     );
     assert!(adb.seen().is_empty());
     assert!(LauncherArtifact::from_path("missing.apk", "a".repeat(64)).is_err());
+}
+
+#[test]
+fn deleted_artifact_is_revalidated_before_any_adb_command() {
+    let (path, artifact) = artifact();
+    fs::remove_file(&path).unwrap();
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, Some(artifact)),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+}
+
+#[test]
+fn shared_recovery_reads_are_fixed_path_and_bounded() {
+    assert_eq!(destination().as_str(), SHARED_RECOVERY_PATH);
+    assert!(bounded_read(&vec![0; MAX_SHARED_COPY_BYTES]).is_ok());
+    assert!(bounded_read(&vec![0; MAX_SHARED_COPY_BYTES + 1]).is_err());
 }
 
 #[test]
@@ -110,9 +132,12 @@ fn missing_shared_storage_and_miui_install_failures_do_not_change_existing_state
     ]);
     assert_eq!(
         inspect(&mut miui, Some(launcher)),
-        Err(InspectionError::Xiaomi(
-            unscroll_desktop_lib::device::XiaomiGuidance::InstallViaUsb
-        ))
+        Err(InspectionError::Xiaomi(vec![
+            unscroll_desktop_lib::device::XiaomiGuidance::InstallViaUsb,
+            unscroll_desktop_lib::device::XiaomiGuidance::MiAccount,
+            unscroll_desktop_lib::device::XiaomiGuidance::Sim,
+            unscroll_desktop_lib::device::XiaomiGuidance::Network,
+        ]))
     );
     assert!(!miui
         .seen()
@@ -137,7 +162,7 @@ fn cleanup_only_uninstalls_the_launcher_installed_by_this_run() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("package:org.unscroll.launcher signing=".to_owned() + &"a".repeat(64)),
+        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success(
             r#"Result: Bundle[{response={"protocol_version":"bridge-v1","ok":true,"result":{"protocol_version":"bridge-v1","recovery_schema":"recovery-v1","launcher_package":"org.unscroll.launcher"}}}]"#,
         ),
@@ -168,7 +193,7 @@ fn existing_launcher_is_never_uninstalled_after_a_preflight_failure() {
         AdbResponse::success("package help suspend unsuspend set-home-activity"),
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success("package:org.unscroll.launcher"),
-        AdbResponse::success("package:org.unscroll.launcher signing=".to_owned() + &"a".repeat(64)),
+        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success("not bridge json"),
     ]);
     assert_eq!(
@@ -198,7 +223,7 @@ fn launcher_signature_mismatch_cleans_up_only_a_bootstrap_install() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("signing=".to_owned() + &"b".repeat(64)),
+        AdbResponse::success("signing_sha256=".to_owned() + &"b".repeat(64)),
     ]);
     assert_eq!(
         inspect(&mut adb, Some(artifact)),
@@ -208,6 +233,64 @@ fn launcher_signature_mismatch_cleans_up_only_a_bootstrap_install() {
         .seen()
         .iter()
         .any(|command| matches!(command, AdbCommand::Install { .. })));
+    assert!(adb
+        .seen()
+        .iter()
+        .any(|command| matches!(command, AdbCommand::Uninstall { .. })));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn launcher_in_any_profile_is_never_bootstrapped_or_uninstalled() {
+    let (path, artifact) = artifact();
+    let mut adb = FakeAdb::scripted([
+        AdbResponse::success(""),
+        AdbResponse::success("List of devices attached\nA\tdevice\n"),
+        AdbResponse::success("34"),
+        AdbResponse::success("Pixel"),
+        AdbResponse::success("Google"),
+        AdbResponse::success("google/pixel/release"),
+        AdbResponse::success("0"),
+        AdbResponse::success("com.android.launcher/.Home"),
+        AdbResponse::success("package help suspend unsuspend set-home-activity"),
+        AdbResponse::success("/sdcard/Documents/Unscroll"),
+        AdbResponse::success("package:org.unscroll.launcher"),
+        AdbResponse::success("signing_sha256=not-the-pinned-signer"),
+    ]);
+    assert_eq!(
+        inspect(&mut adb, Some(artifact)),
+        Err(InspectionError::SignatureMismatch)
+    );
+    assert!(!adb.seen().iter().any(|command| matches!(
+        command,
+        AdbCommand::Install { .. } | AdbCommand::Uninstall { .. }
+    )));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn signer_digest_requires_an_exact_field_match() {
+    let (path, artifact) = artifact();
+    let digest = "a".repeat(64);
+    let mut adb = FakeAdb::scripted([
+        AdbResponse::success(""),
+        AdbResponse::success("List of devices attached\nA\tdevice\n"),
+        AdbResponse::success("34"),
+        AdbResponse::success("Pixel"),
+        AdbResponse::success("Google"),
+        AdbResponse::success("google/pixel/release"),
+        AdbResponse::success("0"),
+        AdbResponse::success("com.android.launcher/.Home"),
+        AdbResponse::success("package help suspend unsuspend set-home-activity"),
+        AdbResponse::success("/sdcard/Documents/Unscroll"),
+        AdbResponse::success(""),
+        AdbResponse::success("Success"),
+        AdbResponse::success(format!("other={digest}x")),
+    ]);
+    assert_eq!(
+        inspect(&mut adb, Some(artifact)),
+        Err(InspectionError::SignatureMismatch)
+    );
     assert!(adb
         .seen()
         .iter()
@@ -235,7 +318,7 @@ fn inspection_collects_a_typed_snapshot_without_mutating_existing_state() {
         AdbResponse::success("/sdcard/Documents/Unscroll"),
         AdbResponse::success(""),
         AdbResponse::success("Success"),
-        AdbResponse::success("package:org.unscroll.launcher signing=".to_owned() + &"a".repeat(64)),
+        AdbResponse::success("signing_sha256=".to_owned() + &"a".repeat(64)),
         AdbResponse::success(health),
         AdbResponse::success(facts),
         AdbResponse::success(catalog),
