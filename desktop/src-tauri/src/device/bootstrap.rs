@@ -296,6 +296,8 @@ fn package_attribute(pool: &[u8], node: &[u8]) -> bool {
     }
     (0..count).any(|index| {
         let attribute = &node[start + index * size..start + (index + 1) * size];
+        let namespace =
+            u32::from_le_bytes([attribute[0], attribute[1], attribute[2], attribute[3]]);
         let name = u32::from_le_bytes([attribute[4], attribute[5], attribute[6], attribute[7]]);
         let raw = u32::from_le_bytes([attribute[8], attribute[9], attribute[10], attribute[11]]);
         let value = if raw != u32::MAX {
@@ -305,7 +307,8 @@ fn package_attribute(pool: &[u8], node: &[u8]) -> bool {
         } else {
             return false;
         };
-        string_value(pool, name).as_deref() == Some("package")
+        namespace == u32::MAX
+            && string_value(pool, name).as_deref() == Some("package")
             && string_value(pool, value).is_some_and(|value| PackageId::parse(&value).is_ok())
     })
 }
