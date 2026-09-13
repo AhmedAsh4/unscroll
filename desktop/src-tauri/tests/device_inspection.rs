@@ -7,6 +7,32 @@ use unscroll_desktop_lib::{
     },
 };
 
+fn stored_zip(entry: &str) -> Vec<u8> {
+    let name = entry.as_bytes();
+    let mut zip = Vec::new();
+    zip.extend_from_slice(b"PK\x03\x04");
+    zip.extend_from_slice(&[20, 0]);
+    zip.extend_from_slice(&[0; 20]);
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(name);
+    let central_directory = zip.len() as u32;
+    zip.extend_from_slice(b"PK\x01\x02");
+    zip.extend_from_slice(&[20, 0, 20, 0]);
+    zip.extend_from_slice(&[0; 20]);
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&[0; 16]);
+    zip.extend_from_slice(name);
+    let central_directory_size = zip.len() as u32 - central_directory;
+    zip.extend_from_slice(b"PK\x05\x06");
+    zip.extend_from_slice(&[0; 4]);
+    zip.extend_from_slice(&[1, 0, 1, 0]);
+    zip.extend_from_slice(&central_directory_size.to_le_bytes());
+    zip.extend_from_slice(&central_directory.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip
+}
+
 fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
     let path = std::env::temp_dir().join(format!(
         "unscroll-task-9-{}-{}.apk",
@@ -16,9 +42,23 @@ fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
             .unwrap()
             .as_nanos()
     ));
-    fs::write(&path, b"PK\x03\x04fixture").unwrap();
+    fs::write(&path, stored_zip("AndroidManifest.xml")).unwrap();
     let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).unwrap();
     (path, artifact)
+}
+
+#[test]
+fn non_apk_zip_fails_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!("unscroll-not-apk-{}.apk", std::process::id()));
+    fs::write(&path, stored_zip("fixture")).unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
 }
 
 #[test]
