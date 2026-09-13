@@ -66,20 +66,64 @@ fn deflated_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
     zip(entry, contents, 8, &encoder.finish().unwrap())
 }
 
-fn binary_manifest() -> Vec<u8> {
-    vec![
-        3, 0, 8, 0, 112, 0, 0, 0, 1, 0, 28, 0, 44, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 32,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, b'm', b'a', b'n', b'i', b'f', b'e', b's', b't', 0,
-        0, 2, 1, 16, 0, 36, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0,
-        0, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 16, 0, 24, 0, 0, 0, 0, 0, 0, 0, 255, 255,
-        255, 255, 255, 255, 255, 255, 0, 0, 0, 0,
-    ]
+fn binary_xml(root: &str, package: Option<&str>) -> Vec<u8> {
+    let mut strings = vec![root, "package"];
+    if let Some(package) = package {
+        strings.push(package);
+    }
+    let mut offsets = Vec::new();
+    let mut data = Vec::new();
+    for value in &strings {
+        offsets.push(data.len() as u32);
+        data.extend_from_slice(&[value.len() as u8, value.len() as u8]);
+        data.extend_from_slice(value.as_bytes());
+        data.push(0);
+    }
+    data.resize((data.len() + 3) & !3, 0);
+    let pool_size = 28 + offsets.len() * 4 + data.len();
+    let attributes = package.is_some() as u16;
+    let mut xml = Vec::new();
+    xml.extend_from_slice(&[3, 0, 8, 0, 0, 0, 0, 0]);
+    xml.extend_from_slice(&[1, 0, 28, 0]);
+    xml.extend_from_slice(&(pool_size as u32).to_le_bytes());
+    xml.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+    xml.extend_from_slice(&[0; 4]);
+    xml.extend_from_slice(&[0, 1, 0, 0]);
+    xml.extend_from_slice(&((28 + offsets.len() * 4) as u32).to_le_bytes());
+    xml.extend_from_slice(&[0; 4]);
+    for offset in offsets {
+        xml.extend_from_slice(&offset.to_le_bytes());
+    }
+    xml.extend_from_slice(&data);
+    xml.extend_from_slice(&[2, 1, 16, 0]);
+    xml.extend_from_slice(&((36 + attributes as usize * 20) as u32).to_le_bytes());
+    xml.extend_from_slice(&[0; 4]);
+    xml.extend_from_slice(&u32::MAX.to_le_bytes());
+    xml.extend_from_slice(&u32::MAX.to_le_bytes());
+    xml.extend_from_slice(&0u32.to_le_bytes());
+    xml.extend_from_slice(&20u16.to_le_bytes());
+    xml.extend_from_slice(&20u16.to_le_bytes());
+    xml.extend_from_slice(&attributes.to_le_bytes());
+    xml.extend_from_slice(&[0; 6]);
+    if package.is_some() {
+        xml.extend_from_slice(&u32::MAX.to_le_bytes());
+        xml.extend_from_slice(&1u32.to_le_bytes());
+        xml.extend_from_slice(&2u32.to_le_bytes());
+        xml.extend_from_slice(&[8, 0, 0, 3]);
+        xml.extend_from_slice(&2u32.to_le_bytes());
+    }
+    xml.extend_from_slice(&[3, 1, 16, 0, 24, 0, 0, 0]);
+    xml.extend_from_slice(&[0; 4]);
+    xml.extend_from_slice(&u32::MAX.to_le_bytes());
+    xml.extend_from_slice(&u32::MAX.to_le_bytes());
+    xml.extend_from_slice(&0u32.to_le_bytes());
+    let length = xml.len() as u32;
+    xml[4..8].copy_from_slice(&length.to_le_bytes());
+    xml
 }
 
-fn binary_non_manifest() -> Vec<u8> {
-    let mut xml = binary_manifest();
-    xml[42..50].copy_from_slice(b"activity");
-    xml
+fn binary_manifest() -> Vec<u8> {
+    binary_xml("manifest", Some("org.unscroll.launcher"))
 }
 
 fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
@@ -145,7 +189,65 @@ fn non_manifest_binary_xml_fails_before_any_adb_command() {
     ));
     fs::write(
         &path,
-        stored_zip("AndroidManifest.xml", &binary_non_manifest()),
+        stored_zip(
+            "AndroidManifest.xml",
+            &binary_xml("activity", Some("org.unscroll.launcher")),
+        ),
+    )
+    .unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    assert!(artifact.is_none());
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn missing_package_manifest_fails_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-no-package-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        stored_zip("AndroidManifest.xml", &binary_xml("manifest", None)),
+    )
+    .unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    assert!(artifact.is_none());
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn invalid_package_manifest_fails_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-invalid-package-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        stored_zip(
+            "AndroidManifest.xml",
+            &binary_xml("manifest", Some("invalid package")),
+        ),
     )
     .unwrap();
     let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();

@@ -1,3 +1,4 @@
+use crate::adb::PackageId;
 use flate2::read::DeflateDecoder;
 use std::{
     fs::File,
@@ -263,7 +264,7 @@ fn binary_xml(manifest: &[u8]) -> bool {
                         manifest_name(
                             pool,
                             u32::from_le_bytes([chunk[20], chunk[21], chunk[22], chunk[23]]),
-                        )
+                        ) && package_attribute(pool, chunk)
                     })
                 {
                     return false;
@@ -280,6 +281,33 @@ fn binary_xml(manifest: &[u8]) -> bool {
         offset += chunk_len;
     }
     root && depth == 0
+}
+
+fn package_attribute(pool: &[u8], node: &[u8]) -> bool {
+    let start = 16 + u16::from_le_bytes([node[24], node[25]]) as usize;
+    let size = u16::from_le_bytes([node[26], node[27]]) as usize;
+    let count = u16::from_le_bytes([node[28], node[29]]) as usize;
+    if size < 20
+        || start
+            .checked_add(size * count)
+            .is_none_or(|end| end > node.len())
+    {
+        return false;
+    }
+    (0..count).any(|index| {
+        let attribute = &node[start + index * size..start + (index + 1) * size];
+        let name = u32::from_le_bytes([attribute[4], attribute[5], attribute[6], attribute[7]]);
+        let raw = u32::from_le_bytes([attribute[8], attribute[9], attribute[10], attribute[11]]);
+        let value = if raw != u32::MAX {
+            raw
+        } else if attribute[15] == 3 {
+            u32::from_le_bytes([attribute[16], attribute[17], attribute[18], attribute[19]])
+        } else {
+            return false;
+        };
+        string_value(pool, name).as_deref() == Some("package")
+            && string_value(pool, value).is_some_and(|value| PackageId::parse(&value).is_ok())
+    })
 }
 
 fn manifest_name(pool: &[u8], index: u32) -> bool {
@@ -326,6 +354,40 @@ fn manifest_name(pool: &[u8], index: u32) -> bool {
                 == Some(&[
                     b'm', 0, b'a', 0, b'n', 0, b'i', 0, b'f', 0, b'e', 0, b's', 0, b't', 0,
                 ])
+    }
+}
+
+fn string_value(pool: &[u8], index: u32) -> Option<String> {
+    if pool.len() < 28 {
+        return None;
+    }
+    let count = u32::from_le_bytes([pool[8], pool[9], pool[10], pool[11]]);
+    let flags = u32::from_le_bytes([pool[16], pool[17], pool[18], pool[19]]);
+    let strings_start = u32::from_le_bytes([pool[20], pool[21], pool[22], pool[23]]) as usize;
+    let header_len = u16::from_le_bytes([pool[2], pool[3]]) as usize;
+    if index >= count {
+        return None;
+    }
+    let offset_index = header_len.checked_add(index as usize * 4)?;
+    let string_offset =
+        u32::from_le_bytes(pool.get(offset_index..offset_index + 4)?.try_into().ok()?) as usize;
+    let start = strings_start.checked_add(string_offset)?;
+    if flags & 0x100 != 0 {
+        let (_, after_chars) = encoded_length(pool, start)?;
+        let (length, data_start) = encoded_length(pool, after_chars)?;
+        std::str::from_utf8(pool.get(data_start..data_start + length)?)
+            .ok()
+            .map(str::to_owned)
+    } else {
+        let length = u16::from_le_bytes(pool.get(start..start + 2)?.try_into().ok()?) as usize;
+        let bytes = pool.get(start + 2..start + 2 + length * 2)?;
+        String::from_utf16(
+            &bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .ok()
     }
 }
 
