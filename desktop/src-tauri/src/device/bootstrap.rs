@@ -16,6 +16,7 @@ const ANDROID_BINARY_XML: u16 = 0x0003;
 const ANDROID_XML_START_ELEMENT: u16 = 0x0102;
 const ANDROID_XML_END_ELEMENT: u16 = 0x0103;
 const MAX_APK_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
+const LAUNCHER_PACKAGE: &str = "org.unscroll.launcher";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LauncherArtifact {
@@ -309,7 +310,9 @@ fn package_attribute(pool: &[u8], node: &[u8]) -> bool {
         };
         namespace == u32::MAX
             && string_value(pool, name).as_deref() == Some("package")
-            && string_value(pool, value).is_some_and(|value| PackageId::parse(&value).is_ok())
+            && string_value(pool, value).is_some_and(|value| {
+                PackageId::parse(&value).is_ok_and(|package| package.as_str() == LAUNCHER_PACKAGE)
+            })
     })
 }
 

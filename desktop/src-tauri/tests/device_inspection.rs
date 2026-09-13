@@ -295,6 +295,35 @@ fn namespaced_package_manifest_fails_before_any_adb_command() {
 }
 
 #[test]
+fn different_package_manifest_fails_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-other-package-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        stored_zip(
+            "AndroidManifest.xml",
+            &binary_xml("manifest", Some("com.example.other")),
+        ),
+    )
+    .unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    assert!(artifact.is_none());
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn deflated_binary_manifest_is_accepted() {
     let path = std::env::temp_dir().join(format!(
         "unscroll-deflated-manifest-{}-{}.apk",
