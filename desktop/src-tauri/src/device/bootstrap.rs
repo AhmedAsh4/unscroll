@@ -1,3 +1,4 @@
+use flate2::read::DeflateDecoder;
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -13,6 +14,7 @@ const ZIP_LOCAL_FILE: &[u8; 4] = b"PK\x03\x04";
 const ANDROID_BINARY_XML: u16 = 0x0003;
 const ANDROID_XML_START_ELEMENT: u16 = 0x0102;
 const ANDROID_XML_END_ELEMENT: u16 = 0x0103;
+const MAX_APK_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LauncherArtifact {
@@ -158,19 +160,28 @@ fn apk_zip(path: &Path, len: u64) -> bool {
         remaining -= record_len;
     }
     manifest.is_some_and(|(method, compressed, uncompressed, local_header)| {
-        method == 0
-            && compressed == uncompressed
-            && binary_xml_manifest(&mut file, local_header, uncompressed, len)
+        binary_xml_manifest(
+            &mut file,
+            method,
+            local_header,
+            compressed,
+            uncompressed,
+            len,
+        )
     })
 }
 
 fn binary_xml_manifest(
     file: &mut File,
+    method: u16,
     local_header: u64,
-    manifest_len: u64,
+    compressed_len: u64,
+    uncompressed_len: u64,
     archive_len: u64,
 ) -> bool {
-    if manifest_len < 8 || file.seek(SeekFrom::Start(local_header)).is_err() {
+    if !(8..=MAX_APK_MANIFEST_BYTES).contains(&uncompressed_len)
+        || file.seek(SeekFrom::Start(local_header)).is_err()
+    {
         return false;
     }
     let mut local = [0; 30];
@@ -187,41 +198,78 @@ fn binary_xml_manifest(
         return false;
     };
     if data_start
-        .checked_add(manifest_len)
+        .checked_add(compressed_len)
         .is_none_or(|end| end > archive_len)
         || file.seek(SeekFrom::Start(data_start)).is_err()
     {
         return false;
     }
-    let mut root = [0; 8];
-    if file.read_exact(&mut root).is_err()
-        || u16::from_le_bytes([root[0], root[1]]) != ANDROID_BINARY_XML
-        || u16::from_le_bytes([root[2], root[3]]) != 8
-        || u32::from_le_bytes([root[4], root[5], root[6], root[7]]) as u64 != manifest_len
+    let mut compressed = vec![0; compressed_len as usize];
+    if file.read_exact(&mut compressed).is_err() {
+        return false;
+    }
+    let mut manifest = Vec::with_capacity(uncompressed_len as usize);
+    match method {
+        0 if compressed_len == uncompressed_len => manifest = compressed,
+        8 => {
+            let mut decoder =
+                DeflateDecoder::new(compressed.as_slice()).take(MAX_APK_MANIFEST_BYTES + 1);
+            if decoder.read_to_end(&mut manifest).is_err() {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    if manifest.len() as u64 != uncompressed_len {
+        return false;
+    }
+    binary_xml(&manifest)
+}
+
+fn binary_xml(manifest: &[u8]) -> bool {
+    if manifest.len() < 8
+        || u16::from_le_bytes([manifest[0], manifest[1]]) != ANDROID_BINARY_XML
+        || u16::from_le_bytes([manifest[2], manifest[3]]) != 8
+        || u32::from_le_bytes([manifest[4], manifest[5], manifest[6], manifest[7]]) as usize
+            != manifest.len()
     {
         return false;
     }
-    let mut remaining = manifest_len - 8;
+    let mut offset = 8usize;
     let mut depth = 0usize;
-    let mut has_element = false;
-    while remaining > 0 {
-        if remaining < 8 {
+    let mut root = false;
+    let mut strings = None;
+    while offset < manifest.len() {
+        if manifest.len() - offset < 8 {
             return false;
         }
-        let mut chunk = [0; 8];
-        if file.read_exact(&mut chunk).is_err() {
+        let kind = u16::from_le_bytes([manifest[offset], manifest[offset + 1]]);
+        let header_len = u16::from_le_bytes([manifest[offset + 2], manifest[offset + 3]]) as usize;
+        let chunk_len = u32::from_le_bytes([
+            manifest[offset + 4],
+            manifest[offset + 5],
+            manifest[offset + 6],
+            manifest[offset + 7],
+        ]) as usize;
+        if header_len < 8 || chunk_len < header_len || chunk_len > manifest.len() - offset {
             return false;
         }
-        let kind = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let header_len = u16::from_le_bytes([chunk[2], chunk[3]]) as u64;
-        let chunk_len = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
-        if header_len < 8 || chunk_len < header_len || chunk_len > remaining {
-            return false;
-        }
+        let chunk = &manifest[offset..offset + chunk_len];
         match kind {
+            0x0001 if header_len >= 28 => strings = Some(chunk),
             ANDROID_XML_START_ELEMENT if header_len >= 16 && chunk_len >= 36 => {
+                if depth == 0
+                    && !strings.is_some_and(|pool| {
+                        manifest_name(
+                            pool,
+                            u32::from_le_bytes([chunk[20], chunk[21], chunk[22], chunk[23]]),
+                        )
+                    })
+                {
+                    return false;
+                }
                 depth += 1;
-                has_element = true;
+                root = true;
             }
             ANDROID_XML_END_ELEMENT if header_len >= 16 && chunk_len >= 24 && depth > 0 => {
                 depth -= 1
@@ -229,13 +277,66 @@ fn binary_xml_manifest(
             ANDROID_XML_END_ELEMENT => return false,
             _ => {}
         }
-        if file
-            .seek(SeekFrom::Current((chunk_len - 8) as i64))
-            .is_err()
-        {
-            return false;
-        }
-        remaining -= chunk_len;
+        offset += chunk_len;
     }
-    has_element && depth == 0
+    root && depth == 0
+}
+
+fn manifest_name(pool: &[u8], index: u32) -> bool {
+    if pool.len() < 28 {
+        return false;
+    }
+    let count = u32::from_le_bytes([pool[8], pool[9], pool[10], pool[11]]);
+    let flags = u32::from_le_bytes([pool[16], pool[17], pool[18], pool[19]]);
+    let strings_start = u32::from_le_bytes([pool[20], pool[21], pool[22], pool[23]]) as usize;
+    let header_len = u16::from_le_bytes([pool[2], pool[3]]) as usize;
+    if index >= count {
+        return false;
+    }
+    let Some(offset_index) = header_len.checked_add(index as usize * 4) else {
+        return false;
+    };
+    let Some(string_offset) = pool
+        .get(offset_index..offset_index + 4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
+    else {
+        return false;
+    };
+    let Some(start) = strings_start.checked_add(string_offset) else {
+        return false;
+    };
+    if flags & 0x100 != 0 {
+        let Some((_, after_chars)) = encoded_length(pool, start) else {
+            return false;
+        };
+        let Some((length, data_start)) = encoded_length(pool, after_chars) else {
+            return false;
+        };
+        pool.get(data_start..data_start + length) == Some(b"manifest".as_slice())
+            && pool.get(data_start + length) == Some(&0)
+    } else {
+        let Some(length) = pool
+            .get(start..start + 2)
+            .map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap()) as usize)
+        else {
+            return false;
+        };
+        length == 8
+            && pool.get(start + 2..start + 18)
+                == Some(&[
+                    b'm', 0, b'a', 0, b'n', 0, b'i', 0, b'f', 0, b'e', 0, b's', 0, b't', 0,
+                ])
+    }
+}
+
+fn encoded_length(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let first = *bytes.get(start)?;
+    if first & 0x80 == 0 {
+        Some((first as usize, start + 1))
+    } else {
+        Some((
+            ((first as usize & 0x7f) << 8) | *bytes.get(start + 1)? as usize,
+            start + 2,
+        ))
+    }
 }

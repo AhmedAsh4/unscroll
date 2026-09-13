@@ -1,4 +1,5 @@
-use std::fs;
+use flate2::{write::DeflateEncoder, Compression};
+use std::{fs, io::Write};
 use unscroll_desktop_lib::{
     adb::{AdbCommand, AdbResponse, FakeAdb},
     device::{inspect, InspectionError, LauncherArtifact, RecoveryObservation},
@@ -15,27 +16,32 @@ fn crc32(bytes: &[u8]) -> u32 {
     }) ^ !0
 }
 
-fn stored_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
+fn zip(entry: &str, contents: &[u8], method: u16, compressed: &[u8]) -> Vec<u8> {
     let name = entry.as_bytes();
     let crc = crc32(contents);
     let length = contents.len() as u32;
+    let compressed_length = compressed.len() as u32;
     let mut zip = Vec::new();
     zip.extend_from_slice(b"PK\x03\x04");
     zip.extend_from_slice(&[20, 0]);
-    zip.extend_from_slice(&[0; 8]);
+    zip.extend_from_slice(&[0; 2]);
+    zip.extend_from_slice(&method.to_le_bytes());
+    zip.extend_from_slice(&[0; 4]);
     zip.extend_from_slice(&crc.to_le_bytes());
-    zip.extend_from_slice(&length.to_le_bytes());
+    zip.extend_from_slice(&compressed_length.to_le_bytes());
     zip.extend_from_slice(&length.to_le_bytes());
     zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(name);
-    zip.extend_from_slice(contents);
+    zip.extend_from_slice(compressed);
     let central_directory = zip.len() as u32;
     zip.extend_from_slice(b"PK\x01\x02");
     zip.extend_from_slice(&[20, 0, 20, 0]);
-    zip.extend_from_slice(&[0; 8]);
+    zip.extend_from_slice(&[0; 2]);
+    zip.extend_from_slice(&method.to_le_bytes());
+    zip.extend_from_slice(&[0; 4]);
     zip.extend_from_slice(&crc.to_le_bytes());
-    zip.extend_from_slice(&length.to_le_bytes());
+    zip.extend_from_slice(&compressed_length.to_le_bytes());
     zip.extend_from_slice(&length.to_le_bytes());
     zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
     zip.extend_from_slice(&[0; 16]);
@@ -50,6 +56,16 @@ fn stored_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
     zip
 }
 
+fn stored_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
+    zip(entry, contents, 0, contents)
+}
+
+fn deflated_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(contents).unwrap();
+    zip(entry, contents, 8, &encoder.finish().unwrap())
+}
+
 fn binary_manifest() -> Vec<u8> {
     vec![
         3, 0, 8, 0, 112, 0, 0, 0, 1, 0, 28, 0, 44, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 32,
@@ -58,6 +74,12 @@ fn binary_manifest() -> Vec<u8> {
         0, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 16, 0, 24, 0, 0, 0, 0, 0, 0, 0, 255, 255,
         255, 255, 255, 255, 255, 255, 0, 0, 0, 0,
     ]
+}
+
+fn binary_non_manifest() -> Vec<u8> {
+    let mut xml = binary_manifest();
+    xml[42..50].copy_from_slice(b"activity");
+    xml
 }
 
 fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
@@ -108,6 +130,51 @@ fn text_manifest_fails_before_any_adb_command() {
         Err(InspectionError::LauncherArtifactUnavailable)
     );
     assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn non_manifest_binary_xml_fails_before_any_adb_command() {
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-non-manifest-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        stored_zip("AndroidManifest.xml", &binary_non_manifest()),
+    )
+    .unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    assert!(artifact.is_none());
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn deflated_binary_manifest_is_accepted() {
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-deflated-manifest-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        deflated_zip("AndroidManifest.xml", &binary_manifest()),
+    )
+    .unwrap();
+    assert!(LauncherArtifact::from_path(&path, "a".repeat(64)).is_ok());
     fs::remove_file(path).unwrap();
 }
 
