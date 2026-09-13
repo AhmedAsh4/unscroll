@@ -9,6 +9,10 @@ const APK_MANIFEST: &[u8] = b"AndroidManifest.xml";
 const ZIP_CENTRAL_DIRECTORY: &[u8; 4] = b"PK\x01\x02";
 const ZIP_END_OF_CENTRAL_DIRECTORY: &[u8; 4] = b"PK\x05\x06";
 const ZIP_EOCD_MAX_SIZE: u64 = 22 + u16::MAX as u64;
+const ZIP_LOCAL_FILE: &[u8; 4] = b"PK\x03\x04";
+const ANDROID_BINARY_XML: u16 = 0x0003;
+const ANDROID_XML_START_ELEMENT: u16 = 0x0102;
+const ANDROID_XML_END_ELEMENT: u16 = 0x0103;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LauncherArtifact {
@@ -111,7 +115,7 @@ fn apk_zip(path: &Path, len: u64) -> bool {
         return false;
     }
     let mut remaining = directory_len;
-    let mut manifest = false;
+    let mut manifest = None;
     for _ in 0..entries {
         if remaining < 46 {
             return false;
@@ -137,7 +141,14 @@ fn apk_zip(path: &Path, len: u64) -> bool {
         if file.read_exact(&mut name).is_err() {
             return false;
         }
-        manifest |= name == APK_MANIFEST;
+        if name == APK_MANIFEST {
+            manifest = Some((
+                u16::from_le_bytes([header[10], header[11]]),
+                u32::from_le_bytes([header[20], header[21], header[22], header[23]]) as u64,
+                u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as u64,
+                u32::from_le_bytes([header[42], header[43], header[44], header[45]]) as u64,
+            ));
+        }
         if file
             .seek(SeekFrom::Current((extra_len + comment_len) as i64))
             .is_err()
@@ -146,5 +157,85 @@ fn apk_zip(path: &Path, len: u64) -> bool {
         }
         remaining -= record_len;
     }
-    manifest
+    manifest.is_some_and(|(method, compressed, uncompressed, local_header)| {
+        method == 0
+            && compressed == uncompressed
+            && binary_xml_manifest(&mut file, local_header, uncompressed, len)
+    })
+}
+
+fn binary_xml_manifest(
+    file: &mut File,
+    local_header: u64,
+    manifest_len: u64,
+    archive_len: u64,
+) -> bool {
+    if manifest_len < 8 || file.seek(SeekFrom::Start(local_header)).is_err() {
+        return false;
+    }
+    let mut local = [0; 30];
+    if file.read_exact(&mut local).is_err() || &local[..4] != ZIP_LOCAL_FILE {
+        return false;
+    }
+    let name_len = u16::from_le_bytes([local[26], local[27]]) as u64;
+    let extra_len = u16::from_le_bytes([local[28], local[29]]) as u64;
+    let Some(data_start) = local_header
+        .checked_add(30)
+        .and_then(|offset| offset.checked_add(name_len))
+        .and_then(|offset| offset.checked_add(extra_len))
+    else {
+        return false;
+    };
+    if data_start
+        .checked_add(manifest_len)
+        .is_none_or(|end| end > archive_len)
+        || file.seek(SeekFrom::Start(data_start)).is_err()
+    {
+        return false;
+    }
+    let mut root = [0; 8];
+    if file.read_exact(&mut root).is_err()
+        || u16::from_le_bytes([root[0], root[1]]) != ANDROID_BINARY_XML
+        || u16::from_le_bytes([root[2], root[3]]) != 8
+        || u32::from_le_bytes([root[4], root[5], root[6], root[7]]) as u64 != manifest_len
+    {
+        return false;
+    }
+    let mut remaining = manifest_len - 8;
+    let mut depth = 0usize;
+    let mut has_element = false;
+    while remaining > 0 {
+        if remaining < 8 {
+            return false;
+        }
+        let mut chunk = [0; 8];
+        if file.read_exact(&mut chunk).is_err() {
+            return false;
+        }
+        let kind = u16::from_le_bytes([chunk[0], chunk[1]]);
+        let header_len = u16::from_le_bytes([chunk[2], chunk[3]]) as u64;
+        let chunk_len = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
+        if header_len < 8 || chunk_len < header_len || chunk_len > remaining {
+            return false;
+        }
+        match kind {
+            ANDROID_XML_START_ELEMENT if header_len >= 16 && chunk_len >= 36 => {
+                depth += 1;
+                has_element = true;
+            }
+            ANDROID_XML_END_ELEMENT if header_len >= 16 && chunk_len >= 24 && depth > 0 => {
+                depth -= 1
+            }
+            ANDROID_XML_END_ELEMENT => return false,
+            _ => {}
+        }
+        if file
+            .seek(SeekFrom::Current((chunk_len - 8) as i64))
+            .is_err()
+        {
+            return false;
+        }
+        remaining -= chunk_len;
+    }
+    has_element && depth == 0
 }

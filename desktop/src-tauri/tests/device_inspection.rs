@@ -7,19 +7,36 @@ use unscroll_desktop_lib::{
     },
 };
 
-fn stored_zip(entry: &str) -> Vec<u8> {
+fn crc32(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(!0, |crc, &byte| {
+        (0..8).fold(crc ^ byte as u32, |crc, _| {
+            (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)))
+        })
+    }) ^ !0
+}
+
+fn stored_zip(entry: &str, contents: &[u8]) -> Vec<u8> {
     let name = entry.as_bytes();
+    let crc = crc32(contents);
+    let length = contents.len() as u32;
     let mut zip = Vec::new();
     zip.extend_from_slice(b"PK\x03\x04");
     zip.extend_from_slice(&[20, 0]);
-    zip.extend_from_slice(&[0; 20]);
+    zip.extend_from_slice(&[0; 8]);
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&length.to_le_bytes());
+    zip.extend_from_slice(&length.to_le_bytes());
     zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(name);
+    zip.extend_from_slice(contents);
     let central_directory = zip.len() as u32;
     zip.extend_from_slice(b"PK\x01\x02");
     zip.extend_from_slice(&[20, 0, 20, 0]);
-    zip.extend_from_slice(&[0; 20]);
+    zip.extend_from_slice(&[0; 8]);
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&length.to_le_bytes());
+    zip.extend_from_slice(&length.to_le_bytes());
     zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
     zip.extend_from_slice(&[0; 16]);
     zip.extend_from_slice(name);
@@ -33,6 +50,16 @@ fn stored_zip(entry: &str) -> Vec<u8> {
     zip
 }
 
+fn binary_manifest() -> Vec<u8> {
+    vec![
+        3, 0, 8, 0, 112, 0, 0, 0, 1, 0, 28, 0, 44, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 32,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, b'm', b'a', b'n', b'i', b'f', b'e', b's', b't', 0,
+        0, 2, 1, 16, 0, 36, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0,
+        0, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 16, 0, 24, 0, 0, 0, 0, 0, 0, 0, 255, 255,
+        255, 255, 255, 255, 255, 255, 0, 0, 0, 0,
+    ]
+}
+
 fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
     let path = std::env::temp_dir().join(format!(
         "unscroll-task-9-{}-{}.apk",
@@ -42,16 +69,39 @@ fn artifact() -> (std::path::PathBuf, LauncherArtifact) {
             .unwrap()
             .as_nanos()
     ));
-    fs::write(&path, stored_zip("AndroidManifest.xml")).unwrap();
+    fs::write(&path, stored_zip("AndroidManifest.xml", &binary_manifest())).unwrap();
     let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).unwrap();
     (path, artifact)
 }
 
 #[test]
 fn non_apk_zip_fails_before_any_adb_command() {
-    let path = std::env::temp_dir().join(format!("unscroll-not-apk-{}.apk", std::process::id()));
-    fs::write(&path, stored_zip("fixture")).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-not-apk-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&path, stored_zip("fixture", b"")).unwrap();
     let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    let mut adb = FakeAdb::scripted([]);
+    assert_eq!(
+        inspect(&mut adb, artifact),
+        Err(InspectionError::LauncherArtifactUnavailable)
+    );
+    assert!(adb.seen().is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn text_manifest_fails_before_any_adb_command() {
+    let path =
+        std::env::temp_dir().join(format!("unscroll-text-manifest-{}.apk", std::process::id()));
+    fs::write(&path, stored_zip("AndroidManifest.xml", b"<manifest/>")).unwrap();
+    let artifact = LauncherArtifact::from_path(&path, "a".repeat(64)).ok();
+    assert!(artifact.is_none());
     let mut adb = FakeAdb::scripted([]);
     assert_eq!(
         inspect(&mut adb, artifact),
@@ -74,7 +124,14 @@ fn absent_artifact_fails_before_any_adb_command() {
 
 #[test]
 fn non_apk_bytes_fail_before_any_adb_command() {
-    let path = std::env::temp_dir().join(format!("unscroll-not-apk-{}.apk", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "unscroll-not-apk-{}-{}.apk",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::write(&path, b"fixture").unwrap();
     assert!(LauncherArtifact::from_path(&path, "a".repeat(64)).is_err());
     let mut adb = FakeAdb::scripted([]);
