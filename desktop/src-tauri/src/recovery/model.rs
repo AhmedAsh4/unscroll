@@ -29,11 +29,30 @@ enum Json {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceBinding { pub serial: String, pub fingerprint: String, pub user_id: u64 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialPackageSuspension { pub package: String, pub suspended: bool, pub user_id: u64 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineInput { pub binding: DeviceBinding, pub baseline_id: String, pub baseline_launcher: String, pub initial_home: String, pub initial_packages: Vec<InitialPackageSuspension>, pub allowed_packages: Vec<String> }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryEnvelopeV1 {
     value: Json,
 }
 
 impl RecoveryEnvelopeV1 {
+    pub fn new_baseline(input: BaselineInput) -> Result<Self, ValidationError> {
+        let mut packages = input.initial_packages; packages.sort_by(|a, b| a.package.cmp(&b.package));
+        let mut allowed = input.allowed_packages; allowed.sort_by(|a, b| a.cmp(b));
+        let mut root = BTreeMap::from([
+            ("active_policy".into(), Json::Object(BTreeMap::from([("allowed_packages".into(), Json::Array(allowed.into_iter().map(|p| Json::String(p)).collect())), ("baseline_launcher_package".into(), Json::String(input.baseline_launcher.clone()))]))),
+            ("baseline".into(), Json::Object(BTreeMap::from([("baseline_id".into(), Json::String(input.baseline_id.clone())), ("baseline_launcher_package".into(), Json::String(input.baseline_launcher.clone())), ("initial_home_component".into(), Json::String(input.initial_home)), ("initial_packages".into(), Json::Array(packages.into_iter().map(|p| Json::Object(BTreeMap::from([("package_id".into(), Json::String(p.package)), ("suspended".into(), Json::Bool(p.suspended)), ("user_id".into(), Json::Number(p.user_id))]))).collect()))]))),
+            ("baseline_id".into(), Json::String(input.baseline_id)), ("checksum".into(), Json::String(String::new())),
+            ("device_binding".into(), Json::Object(BTreeMap::from([("fingerprint".into(), Json::String(input.binding.fingerprint)), ("serial".into(), Json::String(input.binding.serial)), ("user_id".into(), Json::Number(input.binding.user_id))]))),
+            ("journal".into(), Json::Array(Vec::new())), ("maintenance".into(), Json::Object(BTreeMap::from([("state".into(), Json::String("closed".into()))]))), ("previous_revision_hash".into(), Json::Null), ("revision".into(), Json::Number(0)), ("schema_version".into(), Json::String("recovery-v1".into())),
+        ]);
+        let envelope = Self { value: Json::Object(root.clone()) }; root.insert("checksum".into(), Json::String(envelope.computed_checksum())); let envelope = Self { value: Json::Object(root) }; envelope.validate()?; Ok(envelope)
+    }
     pub fn parse(input: &str) -> Result<Self, ValidationError> {
         if input.len() > MAX_INPUT {
             return Err(ValidationError::Field);
@@ -80,6 +99,18 @@ impl RecoveryEnvelopeV1 {
         Ok(envelope)
     }
 
+    pub fn baseline_hash(&self) -> String {
+        sha256_hex(canonical(self.part("baseline").expect("validated baseline")).as_bytes())
+    }
+
+    pub fn has_applied_private_cleanup(&self) -> bool {
+        self.array_at("journal").is_some_and(|journal| journal.iter().any(|entry| {
+            let Ok(entry) = object(entry, ValidationError::History) else { return false };
+            entry.get("state") == Some(&Json::String("applied".into()))
+                && matches!(entry.get("operation"), Some(Json::Object(operation)) if operation.get("kind") == Some(&Json::String("cleanup".into())) && operation.get("target") == Some(&Json::String("private_envelope".into())) && operation.get("removed") == Some(&Json::Bool(true)))
+        }))
+    }
+
     pub fn canonical_json(&self) -> String {
         canonical(&self.value)
     }
@@ -107,7 +138,7 @@ impl RecoveryEnvelopeV1 {
         let new = newer.array_at("journal").ok_or(ValidationError::Schema)?;
         let old_revision = self.number_at("revision").ok_or(ValidationError::Schema)?;
         let new_revision = newer.number_at("revision").ok_or(ValidationError::Schema)?;
-        if new_revision <= old_revision || new.len() < old.len() {
+        if new_revision != old_revision + 1 || new.len() < old.len() {
             return Err(ValidationError::History);
         }
         let mut changed = new.len() > old.len();
@@ -131,6 +162,80 @@ impl RecoveryEnvelopeV1 {
             return Err(ValidationError::History);
         }
         Ok(())
+    }
+
+    pub fn append_pending(
+        &self,
+        id: &str,
+        operation: &str,
+        inverse: &str,
+    ) -> Result<Self, ValidationError> {
+        self.validate()?;
+        uuid(id)?;
+        let operation = Parser::new(operation).parse()?;
+        let inverse = Parser::new(inverse).parse()?;
+        let kind = validate_operation(&operation)?;
+        if validate_operation(&inverse)? != kind || !is_inverse(&operation, &inverse, kind)? {
+            return Err(ValidationError::Operation);
+        }
+        let mut root = object(&self.value, ValidationError::Schema)?.clone();
+        let journal = match root.get_mut("journal") {
+            Some(Json::Array(journal)) => journal,
+            _ => return Err(ValidationError::Schema),
+        };
+        if journal.iter().any(|entry| entry_state(entry) == Ok("pending")) {
+            return Err(ValidationError::History);
+        }
+        journal.push(Json::Object(BTreeMap::from([
+            ("id".into(), Json::String(id.into())),
+            ("inverse".into(), inverse),
+            ("operation".into(), operation),
+            ("state".into(), Json::String("pending".into())),
+        ])));
+        self.seal_next(root)
+    }
+
+    pub fn mark_applied(&self, id: &str) -> Result<Self, ValidationError> {
+        self.validate()?;
+        uuid(id)?;
+        let mut root = object(&self.value, ValidationError::Schema)?.clone();
+        let journal = match root.get_mut("journal") {
+            Some(Json::Array(journal)) => journal,
+            _ => return Err(ValidationError::Schema),
+        };
+        let Some(entry) = journal.iter_mut().find(|entry| {
+            object(entry, ValidationError::History)
+                .ok()
+                .and_then(|entry| entry.get("id"))
+                == Some(&Json::String(id.into()))
+        }) else {
+            return Err(ValidationError::History);
+        };
+        let entry = object_mut(entry, ValidationError::History)?;
+        if entry.get("state") != Some(&Json::String("pending".into())) {
+            return Err(ValidationError::History);
+        }
+        entry.insert("state".into(), Json::String("applied".into()));
+        self.seal_next(root)
+    }
+
+    fn seal_next(&self, mut root: BTreeMap<String, Json>) -> Result<Self, ValidationError> {
+        let revision = number(root.get("revision").ok_or(ValidationError::Schema)?)?;
+        root.insert(
+            "revision".into(),
+            Json::Number(revision.checked_add(1).ok_or(ValidationError::History)?),
+        );
+        root.insert(
+            "previous_revision_hash".into(),
+            Json::String(self.computed_checksum()),
+        );
+        root.insert("checksum".into(), Json::String(String::new()));
+        let mut next = Self { value: Json::Object(root) };
+        let checksum = next.computed_checksum();
+        object_mut(&mut next.value, ValidationError::Schema)?
+            .insert("checksum".into(), Json::String(checksum));
+        next.validate()?;
+        Ok(next)
     }
 
     fn validate(&self) -> Result<(), ValidationError> {
@@ -504,6 +609,16 @@ fn object(
     value: &Json,
     error: ValidationError,
 ) -> Result<&BTreeMap<String, Json>, ValidationError> {
+    if let Json::Object(o) = value {
+        Ok(o)
+    } else {
+        Err(error)
+    }
+}
+fn object_mut(
+    value: &mut Json,
+    error: ValidationError,
+) -> Result<&mut BTreeMap<String, Json>, ValidationError> {
     if let Json::Object(o) = value {
         Ok(o)
     } else {

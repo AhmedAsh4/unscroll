@@ -10,6 +10,7 @@ pub enum ValidationError {
     InvalidDestination,
     InvalidFingerprint,
     InvalidStreamId,
+    InvalidRecoveryEnvelope,
     InvalidCursor,
 }
 fn safe(value: &str, max: usize, allowed: impl Fn(u8, usize) -> bool) -> bool {
@@ -153,6 +154,24 @@ impl Fingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryEnvelope(String);
+impl RecoveryEnvelope {
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+        crate::recovery::model::RecoveryEnvelopeV1::parse(value)
+            .and_then(|envelope| {
+                (envelope.canonical_json() == value)
+                    .then_some(())
+                    .ok_or(crate::recovery::model::ValidationError::Syntax)
+            })
+            .map(|()| Self(value.into()))
+            .map_err(|_| ValidationError::InvalidRecoveryEnvelope)
+    }
+    fn json(&self) -> String {
+        self.0.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+}
 impl StreamId {
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
         (value.len() == 32
@@ -249,6 +268,11 @@ pub enum BridgeOperation {
         fingerprint: Fingerprint,
     },
     ReadIcon(StreamId),
+    WriteEnvelope {
+        device_serial: Serial,
+        fingerprint: Fingerprint,
+        envelope: RecoveryEnvelope,
+    },
 }
 impl BridgeOperation {
     fn arguments(&self) -> Vec<String> {
@@ -264,6 +288,7 @@ impl BridgeOperation {
             }
             Self::ReadEnvelope { device_serial, fingerprint } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"read_envelope\",\"arguments\":{{\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}}}}}}", device_serial.as_str(), fingerprint.as_str())),
             Self::ReadIcon(stream) => return vec!["content".into(), "read".into(), "--uri".into(), format!("{URI}/bridge-v1/icon/{}", stream.as_str())],
+            Self::WriteEnvelope { device_serial, fingerprint, envelope } => Some(format!("{{\"protocol_version\":\"bridge-v1\",\"operation\":\"write_envelope\",\"arguments\":{{\"device_binding\":{{\"serial\":\"{}\",\"fingerprint\":\"{}\",\"user_id\":0}},\"envelope\":\"{}\"}}}}", device_serial.as_str(), fingerprint.as_str(), envelope.json())),
         };
         vec![
             "content".into(),
@@ -311,6 +336,7 @@ pub enum DeviceOperation {
         app_op: AppOp,
         mode: AppOpMode,
     },
+    RemoveSharedRecovery,
     Suspend {
         package: PackageId,
         user: UserId,
@@ -453,6 +479,11 @@ impl AdbCommand {
                         "0".into(),
                         "-a".into(),
                         "android.intent.action.INSTALL_PACKAGE".into(),
+                    ]),
+                    DeviceOperation::RemoveSharedRecovery => args.extend([
+                        "rm".into(),
+                        "-f".into(),
+                        "/sdcard/Documents/Unscroll/recovery-v1.json".into(),
                     ]),
                     DeviceOperation::AppOpSet {
                         package,
@@ -597,6 +628,10 @@ impl AdbCommand {
                 operation: DeviceOperation::AppOpSet { .. },
                 ..
             } => "app-op-set",
+            Self::Device {
+                operation: DeviceOperation::RemoveSharedRecovery,
+                ..
+            } => "shared-recovery-remove",
             Self::Device {
                 operation: DeviceOperation::Suspend { .. },
                 ..

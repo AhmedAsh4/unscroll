@@ -2,8 +2,8 @@ use std::{path::PathBuf, time::Duration};
 use unscroll_desktop_lib::adb::{
     parse_devices, redacted_diagnostic, require_success, stop_server, AdbCommand, AdbError,
     AdbOutput, AdbResponse, AppOp, AppOpMode, BridgeOperation, BundledAdb, Component, Cursor,
-    Destination, DeviceOperation, FakeAdb, PackageId, Property, Serial, StreamId, UserId,
-    ValidationError,
+    Destination, DeviceOperation, FakeAdb, PackageId, Property, RecoveryEnvelope, Serial, StreamId,
+    UserId, ValidationError,
 };
 use unscroll_desktop_lib::device::{
     classify_api, classify_bootstrap, discover, ApiSupport, BootstrapError, Discovery,
@@ -381,6 +381,44 @@ fn bootstrap_commands_keep_install_and_cleanup_typed() {
             "--user",
             "all",
             "org.unscroll.launcher"
+        ]
+    );
+}
+
+#[test]
+fn recovery_persistence_commands_are_fixed_and_typed() {
+    let serial = Serial::parse("emulator-5554").unwrap();
+    let fingerprint = unscroll_desktop_lib::adb::Fingerprint::parse("google/pixel/test").unwrap();
+    let envelope = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contracts/fixtures/recovery-v1/valid/new-baseline.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        AdbCommand::Device {
+            serial: serial.clone(),
+            operation: DeviceOperation::Bridge(BridgeOperation::WriteEnvelope {
+                device_serial: serial.clone(),
+                fingerprint,
+                envelope: RecoveryEnvelope::parse(envelope.trim()).unwrap(),
+            }),
+        }
+        .class(),
+        "bridge"
+    );
+    assert_eq!(
+        AdbCommand::Device {
+            serial,
+            operation: DeviceOperation::RemoveSharedRecovery,
+        }
+        .arguments(),
+        vec![
+            "-s",
+            "emulator-5554",
+            "shell",
+            "rm",
+            "-f",
+            "/sdcard/Documents/Unscroll/recovery-v1.json"
         ]
     );
 }

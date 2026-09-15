@@ -133,3 +133,15 @@ fn rejects_a_well_formed_envelope_bound_to_another_device() {
         Err(model::ValidationError::DeviceBinding),
     );
 }
+#[test]
+fn builds_and_advances_a_standalone_baseline() {
+    let baseline = model::RecoveryEnvelopeV1::new_baseline(model::BaselineInput {
+        binding: model::DeviceBinding { serial: "ABC123".into(), fingerprint: "google/pixel/test".into(), user_id: 0 },
+        baseline_id: "11111111-1111-1111-1111-111111111111".into(), baseline_launcher: "com.launcher".into(), initial_home: "com.launcher/.Home".into(),
+        initial_packages: vec![model::InitialPackageSuspension { package: "com.phone".into(), suspended: false, user_id: 0 }], allowed_packages: vec!["com.phone".into()],
+    }).unwrap();
+    assert!(!baseline.baseline_hash().is_empty());
+    let pending = baseline.append_pending("22222222-2222-2222-2222-222222222222", r#"{"kind":"cleanup","removed":true,"target":"private_envelope"}"#, r#"{"kind":"cleanup","removed":false,"target":"private_envelope"}"#).unwrap();
+    assert!(!pending.has_applied_private_cleanup());
+    assert!(pending.mark_applied("22222222-2222-2222-2222-222222222222").unwrap().has_applied_private_cleanup());
+}

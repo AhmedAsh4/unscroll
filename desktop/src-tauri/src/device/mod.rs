@@ -1,6 +1,6 @@
 mod bootstrap;
 mod capabilities;
-mod catalog;
+pub(crate) mod catalog;
 mod discovery;
 mod errors;
 mod identity;

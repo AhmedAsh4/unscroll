@@ -247,6 +247,17 @@ pub(crate) fn envelope(text: &str) -> Result<BridgeReply, ()> {
     }
 }
 
+pub(crate) fn recovery_envelope(text: &str) -> Result<Option<String>, ()> {
+    match envelope(text)? {
+        BridgeReply::Missing => Ok(None),
+        BridgeReply::Value(Json::Object(result)) => {
+            exact(&result, &["envelope"])?;
+            Ok(Some(string(&result, "envelope")?.to_owned()))
+        }
+        _ => Err(()),
+    }
+}
+
 pub(crate) fn reply(text: &str) -> Result<Json, ()> {
     let Json::Object(root) = frame(text)? else {
         return Err(());
