@@ -6,6 +6,9 @@ const MAX_INPUT: usize = 65_536;
 const MAX_ITEMS: usize = 512;
 const MAX_TEXT: usize = 512;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalState { Pending, Applied, Failed }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     Syntax,
@@ -149,7 +152,7 @@ impl RecoveryEnvelopeV1 {
             let before_state = entry_state(before)?;
             let after_state = entry_state(after)?;
             if before_state != after_state {
-                if before_state != "pending" || after_state != "applied" {
+                if before_state != "pending" || (after_state != "applied" && after_state != "failed") {
                     return Err(ValidationError::History);
                 }
                 changed = true;
@@ -195,6 +198,55 @@ impl RecoveryEnvelopeV1 {
         self.seal_next(root)
     }
 
+    pub fn journal_state(&self, id: &str) -> Option<JournalState> {
+        self.array_at("journal")?.iter().find_map(|entry| {
+            let entry = object(entry, ValidationError::History).ok()?;
+            if entry.get("id") != Some(&Json::String(id.into())) { return None }
+            match entry.get("state") { Some(Json::String(state)) => match state.as_str() { "pending" => Some(JournalState::Pending), "applied" => Some(JournalState::Applied), "failed" => Some(JournalState::Failed), _ => None }, _ => None }
+        })
+    }
+    pub fn pending_id(&self) -> Option<String> {
+        self.array_at("journal")?.iter().find_map(|entry| {
+            let entry = object(entry, ValidationError::History).ok()?;
+            (entry.get("state") == Some(&Json::String("pending".into())))
+                .then(|| match entry.get("id") { Some(Json::String(id)) => id.clone(), _ => String::new() })
+        }).filter(|id| !id.is_empty())
+    }
+    pub fn active_allowed_packages(&self) -> Vec<String> {
+        let Some(Json::Object(policy)) = self.part("active_policy") else { return Vec::new() };
+        let Some(Json::Array(packages)) = policy.get("allowed_packages") else { return Vec::new() };
+        packages.iter().filter_map(|value| match value { Json::String(value) => Some(value.clone()), _ => None }).collect()
+    }
+
+    pub fn mark_failed(&self, id: &str) -> Result<Self, ValidationError> {
+        self.mark_terminal(id, "failed")
+    }
+
+    fn mark_terminal(&self, id: &str, state: &str) -> Result<Self, ValidationError> {
+        self.validate()?; uuid(id)?;
+        let mut root = object(&self.value, ValidationError::Schema)?.clone();
+        let journal = match root.get_mut("journal") { Some(Json::Array(journal)) => journal, _ => return Err(ValidationError::Schema) };
+        let Some(entry) = journal.iter_mut().find(|entry| object(entry, ValidationError::History).ok().and_then(|entry| entry.get("id")) == Some(&Json::String(id.into()))) else { return Err(ValidationError::History) };
+        let entry = object_mut(entry, ValidationError::History)?;
+        if entry.get("state") != Some(&Json::String("pending".into())) { return Err(ValidationError::History) }
+        entry.insert("state".into(), Json::String(state.into())); self.seal_next(root)
+    }
+
+    pub fn append_pending_launcher_policy(&self, id: &str, mut allowed: Vec<String>) -> Result<Self, ValidationError> {
+        allowed.sort(); allowed.dedup();
+        for value in &allowed { package(value)?; }
+        let before = self.active_allowed_packages();
+        let operation = format!("{{\"allowed_packages\":[{}],\"kind\":\"launcher_policy\"}}", allowed.iter().map(|package| format!("\"{package}\"")).collect::<Vec<_>>().join(","));
+        let inverse = format!("{{\"allowed_packages\":[{}],\"kind\":\"launcher_policy\"}}", before.iter().map(|package| format!("\"{package}\"")).collect::<Vec<_>>().join(","));
+        let pending = self.append_pending(id, &operation, &inverse)?;
+        let mut root = object(&pending.value, ValidationError::Schema)?.clone();
+        let Some(Json::Object(policy)) = root.get_mut("active_policy") else { return Err(ValidationError::Schema) };
+        policy.insert("allowed_packages".into(), Json::Array(allowed.into_iter().map(Json::String).collect()));
+        root.insert("checksum".into(), Json::String(String::new()));
+        let unsigned = Self { value: Json::Object(root.clone()) };
+        root.insert("checksum".into(), Json::String(unsigned.computed_checksum()));
+        let result = Self { value: Json::Object(root) }; result.validate()?; Ok(result)
+    }
     pub fn mark_applied(&self, id: &str) -> Result<Self, ValidationError> {
         self.validate()?;
         uuid(id)?;
@@ -313,10 +365,10 @@ impl RecoveryEnvelopeV1 {
                 item.get("state").ok_or(ValidationError::Operation)?,
                 ValidationError::Operation,
             )?;
-            if state != "pending" && state != "applied" {
+            if state != "pending" && state != "applied" && state != "failed" {
                 return Err(ValidationError::Operation);
             }
-            if state == "applied" {
+            if state == "applied" || state == "failed" {
                 applied += 1;
             }
             let operation = item.get("operation").ok_or(ValidationError::Operation)?;
@@ -1019,3 +1071,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
     }
     h.iter().map(|v| format!("{v:08x}")).collect()
 }
+
+
+
+
+
+
+
