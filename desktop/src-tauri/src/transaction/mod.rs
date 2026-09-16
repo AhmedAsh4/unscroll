@@ -1,3 +1,2 @@
-mod adapter; mod journal; mod outcome; mod runner; mod verify;
-pub use adapter::AdbTransaction; pub use outcome::{ApplyOutcome, ApplyResult, Decision}; pub use runner::{apply, ApplyError}; pub use verify::{ApplyDevice, DeviceFailure};
-
+mod adapter; mod diagnostics; mod edit; mod journal; mod outcome; mod restore; mod runner; mod session; mod verify;
+pub use adapter::AdbTransaction; pub use diagnostics::{DiagnosticPreview, export, preview, redacted_json}; pub use edit::{EditError, EditOutcome, EditResult, edit}; pub use outcome::{ApplyOutcome, ApplyResult, Decision}; pub use restore::{RESTORE_CONFIRMATION, RestoreDevice, RestoreError, RestoreOutcome, RestoreResult, restore, retry_cleanup}; pub use runner::{apply, ApplyError}; pub use session::{ObservedState, Session, SessionAction, SessionKind, classify}; pub use verify::{ApplyDevice, DeviceFailure};
