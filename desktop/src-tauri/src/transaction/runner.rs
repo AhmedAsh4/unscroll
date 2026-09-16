@@ -26,13 +26,25 @@ pub fn apply<D: ApplyDevice + MirrorStore>(device: &mut D, mut envelope: Recover
         }
         if let Some(pending) = envelope.pending_id() {
             if pending != expected_id { return Ok(ApplyResult { outcome: ApplyOutcome::InconsistentState, envelope, partial_protection }); }
-            match mutate_verify(device, &step.operation) {
+            if matches!(step.operation, Operation::Home { .. }) {
+                match device.verified(&step.operation) {
+                    Ok(true) => { envelope = envelope.mark_applied(&pending).map_err(|_| ApplyError::Journal)?; persist(device, &envelope).map_err(ApplyError::Mirror)?; completed.push(step.clone()); continue; }
+                    Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }),
+                    _ => match device.chooser() { Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }), Err(_) => return Ok(ApplyResult { outcome: ApplyOutcome::InconsistentState, envelope, partial_protection }), Ok(()) => { if matches!(decision, Some(Decision::HomeConfirmed)) { match device.verified(&step.operation) { Ok(true) => { envelope = envelope.mark_applied(&pending).map_err(|_| ApplyError::Journal)?; persist(device, &envelope).map_err(ApplyError::Mirror)?; completed.push(step.clone()); continue; }, Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }), _ => () } } return Ok(ApplyResult { outcome: ApplyOutcome::ChooserRequired, envelope, partial_protection }) } },
+                }
+            }            match mutate_verify(device, &step.operation) {
                 Ok(true) => { envelope = envelope.mark_applied(&pending).map_err(|_| ApplyError::Journal)?; persist(device, &envelope).map_err(ApplyError::Mirror)?; completed.push(step.clone()); continue; }
                 Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }),
                 _ => return Ok(ApplyResult { outcome: ApplyOutcome::InconsistentState, envelope, partial_protection }),
             }
         }        if matches!(step.operation, Operation::Verify) {
-            match mutate_verify(device, &step.operation) {
+            if matches!(step.operation, Operation::Home { .. }) {
+                match device.verified(&step.operation) {
+                    Ok(true) => { envelope = envelope.mark_applied(&pending).map_err(|_| ApplyError::Journal)?; persist(device, &envelope).map_err(ApplyError::Mirror)?; completed.push(step.clone()); continue; }
+                    Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }),
+                    _ => match device.chooser() { Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }), Err(_) => return Ok(ApplyResult { outcome: ApplyOutcome::InconsistentState, envelope, partial_protection }), Ok(()) => { if matches!(decision, Some(Decision::HomeConfirmed)) { match device.verified(&step.operation) { Ok(true) => { envelope = envelope.mark_applied(&pending).map_err(|_| ApplyError::Journal)?; persist(device, &envelope).map_err(ApplyError::Mirror)?; completed.push(step.clone()); continue; }, Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }), _ => () } } return Ok(ApplyResult { outcome: ApplyOutcome::ChooserRequired, envelope, partial_protection }) } },
+                }
+            }            match mutate_verify(device, &step.operation) {
                 Ok(true) => continue,
                 Err(DeviceFailure::Disconnect) => return Ok(ApplyResult { outcome: ApplyOutcome::RecoverableDisconnect, envelope, partial_protection }),
                 _ => return rollback(device, envelope, &completed, partial_protection),
@@ -68,6 +80,8 @@ fn rollback<D: ApplyDevice + MirrorStore>(device:&mut D,mut envelope:RecoveryEnv
 fn mutate_verify<D: ApplyDevice>(device: &mut D, operation: &Operation) -> Result<bool, DeviceFailure> {
     match device.mutate(operation) { Err(DeviceFailure::Disconnect) => Err(DeviceFailure::Disconnect), _ => device.verified(operation) }
 }
+
+
 
 
 
