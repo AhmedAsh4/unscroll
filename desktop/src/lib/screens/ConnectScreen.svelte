@@ -3,11 +3,14 @@
   import { discoverDevices, inspectDevice, getSession } from "../api/invoke.ts";
   import { listenProgress } from "../api/events.ts";
   import {
+    CONNECTION_COPY,
     ConnectionFlow,
     SHOW_BUSY_AFTER_MS,
     deriveSteps,
     routeForSession,
+    type InspectedInfo,
     type ShellUpdate,
+    type WorkspaceSnapshot,
   } from "../state/workspace.ts";
   import ConnectionStatus from "../components/ConnectionStatus.svelte";
   import DeviceCard from "../components/DeviceCard.svelte";
@@ -15,9 +18,19 @@
 
   interface Props {
     onState: (update: ShellUpdate) => void;
+    /** Continue navigates to the chooser (Task 17); absent keeps the ready card. */
+    onContinue?: () => void;
+    /** Hands inspected entries/session up once per ready inspection. */
+    onInspected?: (info: InspectedInfo) => void;
+    /** Restored inspection shown without re-running discovery (Back from chooser). */
+    initialSnapshot?: WorkspaceSnapshot | null;
+    /** Set false with initialSnapshot to skip auto-connect on mount. */
+    autoStart?: boolean;
+    /** Observes snapshot changes so the host can preserve them across remounts. */
+    onSnapshot?: (snapshot: WorkspaceSnapshot) => void;
   }
 
-  let { onState }: Props = $props();
+  let { onState, onContinue, onInspected, initialSnapshot = null, autoStart = true, onSnapshot }: Props = $props();
 
   const flow = new ConnectionFlow(
     { discoverDevices, inspectDevice, getSession },
@@ -28,6 +41,7 @@
       },
       onChange: () => {
         snap = flow.snapshot;
+        onSnapshot?.(flow.snapshot);
         emit();
       },
     },
@@ -37,6 +51,8 @@
   let announcement = $state("");
   let showBusy = $state(false);
   let continued = $state(false);
+  // A restored ready snapshot was already handed up before the remount.
+  let inspectedNotified = $state(false);
   let unlisten: (() => void) | null = null;
 
   const statusState = $derived.by(() => {
@@ -91,6 +107,7 @@
 
   function recheck(): void {
     continued = false;
+    inspectedNotified = false;
     flow.reset();
     snap = flow.snapshot;
     void flow.connect();
@@ -98,9 +115,21 @@
 
   function proceed(): void {
     continued = true;
-    announcement = "Phone ready. App selection is not available in this build yet.";
+    announcement = `${CONNECTION_COPY.ready.heading}. ${CONNECTION_COPY.ready.body}`;
     emit();
+    onContinue?.();
   }
+
+  // Hand inspected data up once per ready inspection so App can seed the
+  // shared chooser selection without re-reading device state. A restored
+  // ready snapshot was already handed up before this mount, so it is
+  // skipped here (the per-mount prop read is stable inside this effect).
+  $effect(() => {
+    if (snap.connection === "ready" && !inspectedNotified && initialSnapshot?.connection !== "ready") {
+      inspectedNotified = true;
+      onInspected?.({ entries: snap.entries, session: snap.session, connection: snap.connection });
+    }
+  });
 
   $effect(() => {
     if (!snap.busy) {
@@ -122,7 +151,16 @@
     }).then((stop) => {
       unlisten = stop;
     });
-    void flow.connect();
+    if (initialSnapshot) {
+      // Back from the chooser: show the last inspection as-is. Only an
+      // explicit user recheck runs discovery again.
+      flow.restoreSnapshot(initialSnapshot);
+      snap = flow.snapshot;
+      onSnapshot?.(flow.snapshot);
+      emit();
+    } else if (autoStart) {
+      void flow.connect();
+    }
   });
 
   onDestroy(() => {

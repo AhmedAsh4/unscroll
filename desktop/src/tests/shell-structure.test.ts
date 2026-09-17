@@ -155,7 +155,13 @@ describe("accessibility structure", () => {
     assert.ok(screen.includes("Waiting"), "passive-wait adjacent action present");
     assert.ok(screen.includes("actionDisabled"), "wait/continue use visibly disabled state");
     assert.doesNotMatch(screen, /opens in the next step/, "no false navigation promise");
-    assert.match(screen, /not available in this build yet/, "honest interim copy present");
+    assert.doesNotMatch(screen, /not available in this build yet/, "interim dead-end copy is gone");
+    assert.match(
+      read("src/lib/state/workspace.ts"),
+      /Continue to choose the apps to keep/,
+      "ready copy continues to the chooser",
+    );
+    assert.ok(screen.includes("onContinue"), "Continue navigates instead of dead-ending");
   });
 });
 

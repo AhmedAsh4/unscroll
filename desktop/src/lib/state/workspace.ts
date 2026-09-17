@@ -12,7 +12,7 @@
  * Known Task 15 edges handled defensively:
  * - Progress payloads may arrive as bare name strings or as objects; see
  *   `normalizeProgressPayload`.
- * - `start_edit` / `open_maintenance` / `close_maintenance` fail closed with
+ * - Edit and maintenance flows fail closed with
  *   `plan-rejected` / `maintenance-blocked`; those codes surface their
  *   server guidance (reconcile / close-first) and never retry silently.
  * - `inspect_device` may return the Rust object shape
@@ -22,7 +22,7 @@
 import type { AppEntryDto, CommandError, CommandErrorCode, SessionDto, SessionKindName } from "../api/types.ts";
 import type { InvokeResult } from "../api/invoke.ts";
 
-export type { CommandError };
+export type { CommandError, SessionDto };
 
 /** The four approved workflow steps, in order. */
 export const STEPS = [
@@ -137,7 +137,7 @@ export const CONNECTION_COPY: Record<ConnectionState, { heading: string; body: s
   },
   ready: {
     heading: "Phone ready",
-    body: "The phone is connected and inspected. App selection is not available in this build yet.",
+    body: "The phone is connected and inspected. Continue to choose the apps to keep.",
     action: "Continue",
   },
   "no-device": {
@@ -531,6 +531,19 @@ export class ConnectionFlow {
     this.notify?.();
   }
 
+  /**
+   * Restores a previously inspected snapshot (e.g. when the host remounts
+   * the Connect screen after Back from the chooser) so the screen shows
+   * the last inspection instead of re-running discovery. Never touches
+   * the device; an explicit user recheck still runs a fresh `connect()`.
+   */
+  restoreSnapshot(snapshot: WorkspaceSnapshot): void {
+    this.lastAnnounced = null;
+    this.snapshot = { ...snapshot, busy: false };
+    this.say(`${this.snapshot.guidance.heading} ${this.snapshot.guidance.body}`);
+    this.notify?.();
+  }
+
   /** Notes a remote progress event (bare string or object, per Task 15). */
   noteRemoteProgress(payload: unknown): void {
     const name = normalizeProgressPayload(payload);
@@ -623,4 +636,280 @@ export class ConnectionFlow {
       this.announce?.(message);
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Task 17: allowlist-first app selection, filtering, and review.      */
+/*                                                                    */
+/* Pure presentation logic only: everything here derives from already */
+/* inspected `AppEntryDto` rows plus the read-only session DTO.       */
+/* Nothing here calls into Rust, constructs device commands, or       */
+/* mutates the phone. Screens use the discover/inspect/session         */
+/* helpers from `../api/invoke.ts`; the chooser and review screens     */
+/* never drive a transaction.                                         */
+/*                                                                    */
+/* Icon wiring point (honest backend reality): the inspect boundary   */
+/* currently carries only the `iconCached` flag per entry — no icon   */
+/* bytes cross into the webview, so there is nothing to decode here.  */
+/* `AppRow` therefore takes an `iconSrc: string | null` prop: a       */
+/* resolved local/object URL when a future Task 15 resource mapping   */
+/* provides one, otherwise null. A null (or failed) source renders    */
+/* the neutral local fallback from `fallbackInitial` — the app's      */
+/* initial letter plus its label. Never substitute remote art, a      */
+/* brand catalog, or guessed icons.                                   */
+/* ------------------------------------------------------------------ */
+
+/** Chooser filter. Kept = kept incl. protected; Blocked = not kept. */
+export type SelectionFilter = "all" | "kept" | "blocked";
+
+/** Allowlist selection keyed by packageId (labels may repeat). */
+export type SelectionMap = Record<string, boolean>;
+
+/** Status pill states: chooser rows plus every review group. */
+export type PillState = "kept" | "blocked" | "protected" | "store" | "unsupported";
+
+/**
+ * Store/sideload-source heuristic. No store or install-source DTOs cross
+ * the inspect boundary, so review grouping falls back to whole-token
+ * matching against `packageId + label`: the text is lowercased, split on
+ * non-alphanumeric boundaries, and matched exactly against STORE_TOKENS.
+ * Whole-token matching matters — substring matching mis-groups ordinary
+ * apps such as "VLC Player" (play in player), "Display Tester" (play in
+ * display), "SuperMarket List" (market in supermarket), or "Installment
+ * Tracker" (install in installment). This stays informational grouping
+ * only — never protection, never a mutation plan; real store restriction
+ * stays a backend hard gate verified per package.
+ */
+export const STORE_TOKENS: ReadonlySet<string> = new Set([
+  "store",
+  "market",
+  "play",
+  "installer",
+  "install",
+  "sideload",
+  "vending",
+]);
+
+/** Lowercase whole tokens of `packageId + label` for heuristic matching. */
+export function storeTokensFor(entry: AppEntryDto): string[] {
+  return `${entry.packageId} ${entry.label}`
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0);
+}
+
+/** True when the entry looks like a store or sideload source (see heuristic). */
+export function isStoreLike(entry: AppEntryDto): boolean {
+  return storeTokensFor(entry).some((token) => STORE_TOKENS.has(token));
+}
+
+/** Protected reasons that mark an entry as unsupported/uncertain. */
+export const UNSUPPORTED_REASON = /unresolved|ambiguous|manufacturer|shared-role|uncertain|cannot/i;
+
+/** Protected reason marking the hidden baseline launcher. */
+export const BASELINE_LAUNCHER_REASON = /baseline launcher/i;
+
+function isUnsupportedReason(reason: string | null): boolean {
+  return reason !== null && UNSUPPORTED_REASON.test(reason);
+}
+
+function isBaselineLauncherReason(reason: string | null): boolean {
+  return reason !== null && BASELINE_LAUNCHER_REASON.test(reason);
+}
+
+/**
+ * Single shared pill mapping for chooser rows and review groups, derived
+ * from the same reason predicates as `reviewGroups`: unsupported
+ * protected entries read Unsupported in both screens, the baseline
+ * launcher and other protected entries read Protected, and
+ * non-protected entries read Kept, Store, or Blocked.
+ */
+export function pillForEntry(entry: AppEntryDto, kept: boolean): PillState {
+  if (entry.protected) {
+    if (!isBaselineLauncherReason(entry.protectedReason) && isUnsupportedReason(entry.protectedReason)) {
+      return "unsupported";
+    }
+    return "protected";
+  }
+  if (kept) return "kept";
+  if (isStoreLike(entry)) return "store";
+  return "blocked";
+}
+
+/**
+ * Builds the allowlist-first selection for a fresh inspection: protected
+ * entries stay kept and locked, everything safely blockable starts
+ * blocked until the user keeps it. Call again for each new inspection —
+ * stale packageIds are dropped and new packages get these defaults.
+ */
+export function createSelection(entries: AppEntryDto[]): SelectionMap {
+  const selection: SelectionMap = {};
+  for (const entry of entries) {
+    selection[entry.packageId] = entry.protected;
+  }
+  return selection;
+}
+
+/**
+ * Stable identity for an inspection result. PackageIds are sorted so a
+ * mere catalog reorder never reseeds: the host keeps the selection
+ * created for the last key and only calls `createSelection` again when
+ * the key changes — so Choose <-> Review back-navigation retains the
+ * user's toggles while a genuinely new inspection resets them.
+ */
+export function selectionKeyFor(entries: AppEntryDto[]): string {
+  return entries
+    .map((entry) => entry.packageId)
+    .sort()
+    .join("\n");
+}
+
+/**
+ * Flips one non-protected entry. Protected toggles are a no-op (the
+ * returned map keeps the protected entry kept). Never mutates `selection`.
+ */
+export function toggleSelection(selection: SelectionMap, entry: AppEntryDto): SelectionMap {
+  const next: SelectionMap = { ...selection };
+  if (!entry.protected) {
+    next[entry.packageId] = !(selection[entry.packageId] === true);
+  }
+  return next;
+}
+
+export interface SelectionCounts {
+  kept: number;
+  blocked: number;
+  total: number;
+}
+
+/** Counts kept (selected, incl. protected), blocked, and total entries. */
+export function selectionCounts(selection: SelectionMap, entries: AppEntryDto[]): SelectionCounts {
+  let kept = 0;
+  for (const entry of entries) {
+    if (selection[entry.packageId] === true) kept += 1;
+  }
+  return { kept, blocked: entries.length - kept, total: entries.length };
+}
+
+/**
+ * Pure catalog view: case-insensitive substring search over label AND
+ * packageId (surrounding whitespace trimmed), combined with the
+ * All/Kept/Blocked filter. Never mutates (or reads beyond) the
+ * selection map.
+ */
+export function filterApps(
+  entries: AppEntryDto[],
+  selection: SelectionMap,
+  query: string,
+  filter: SelectionFilter,
+): AppEntryDto[] {
+  const q = query.trim().toLowerCase();
+  return entries.filter((entry) => {
+    const kept = selection[entry.packageId] === true;
+    if (filter === "kept" && !kept) return false;
+    if (filter === "blocked" && kept) return false;
+    if (q.length === 0) return true;
+    return entry.label.toLowerCase().includes(q) || entry.packageId.toLowerCase().includes(q);
+  });
+}
+
+export interface ReviewGroups {
+  /** Selected, non-protected apps that will remain available. */
+  kept: AppEntryDto[];
+  /** Deselected, non-protected, non-store apps that will be suspended and hidden. */
+  blocked: AppEntryDto[];
+  /** Deselected, non-protected store-like apps Unscroll will restrict. */
+  stores: AppEntryDto[];
+  /** Protected entries that stay available (includes the baseline launcher). */
+  protected: AppEntryDto[];
+  /** Protected entries whose reason marks them unsupported/uncertain. */
+  unsupported: AppEntryDto[];
+  /** The baseline launcher entry when present (also listed in `protected`). */
+  baselineLauncher: AppEntryDto | null;
+}
+
+/**
+ * Partitions the catalog into the five review groups. Every entry lands
+ * in exactly one of kept/blocked/stores/protected/unsupported, so group
+ * sizes always reconcile to the catalog size.
+ */
+export function reviewGroups(entries: AppEntryDto[], selection: SelectionMap): ReviewGroups {
+  const groups: ReviewGroups = {
+    kept: [],
+    blocked: [],
+    stores: [],
+    protected: [],
+    unsupported: [],
+    baselineLauncher: null,
+  };
+  for (const entry of entries) {
+    if (entry.protected) {
+      if (isBaselineLauncherReason(entry.protectedReason)) {
+        if (groups.baselineLauncher === null) groups.baselineLauncher = entry;
+        groups.protected.push(entry);
+      } else if (isUnsupportedReason(entry.protectedReason)) {
+        groups.unsupported.push(entry);
+      } else {
+        groups.protected.push(entry);
+      }
+      continue;
+    }
+    if (selection[entry.packageId] === true) {
+      groups.kept.push(entry);
+    } else if (isStoreLike(entry)) {
+      groups.stores.push(entry);
+    } else {
+      groups.blocked.push(entry);
+    }
+  }
+  return groups;
+}
+
+export interface ApplyGate {
+  connection: ConnectionState;
+  session: SessionDto | null;
+  entries: AppEntryDto[];
+}
+
+/** Apply is enabled only for a ready, new-setup inspection with apps. */
+export function canApply(gate: ApplyGate): boolean {
+  return gate.connection === "ready" && gate.session?.kind === "new-setup" && gate.entries.length > 0;
+}
+
+/**
+ * Plain-text reason a disabled Apply is disabled (null when allowed).
+ * Rendered as text next to the button — never color alone.
+ */
+export function applyBlockReason(
+  connection: ConnectionState,
+  session: SessionDto | null,
+  entries: AppEntryDto[],
+): string | null {
+  if (entries.length === 0) return "No apps were found on the phone, so there is nothing to apply.";
+  if (connection !== "ready") return "Connect and inspect the phone before applying.";
+  if (session?.kind !== "new-setup") {
+    return "This phone already holds Unscroll data. Reconcile the session instead of starting a new setup.";
+  }
+  return null;
+}
+
+/** Text count summary, e.g. "3 kept · 12 blocked · 15 total". */
+export function countText(kept: number, blocked: number, total: number): string {
+  return `${kept} kept · ${blocked} blocked · ${total} total`;
+}
+
+/**
+ * Neutral icon fallback: the first letter of the app label ("?" when the
+ * label is empty). Local text only — never brand art.
+ */
+export function fallbackInitial(label: string): string {
+  const first = label.trim().charAt(0);
+  return first === "" ? "?" : first.toUpperCase();
+}
+
+/** Inspected data handed from Connect to the chooser (identity stays out). */
+export interface InspectedInfo {
+  entries: AppEntryDto[];
+  session: SessionDto | null;
+  connection: ConnectionState;
 }
