@@ -137,11 +137,12 @@ impl UnscrollState {
         self.inner.lock().expect("session lock").plans.remove(serial);
     }
 
-    /// Cache one decoded icon. Rejects oversize payloads (`icon-too-large`)
+    /// Cache one decoded icon. Rejects empty and oversize payloads
+    /// (`icon-too-large`, matching what the `load_app_icon` read reports)
     /// and an overfull catalog (`icon-cache-full`) so a hostile bridge
     /// cannot exhaust desktop memory; handlers skip uncached icons.
     pub fn store_icon(&self, package: &str, bytes: Vec<u8>) -> Result<(), CommandError> {
-        if bytes.len() > MAX_ICON_BYTES {
+        if bytes.is_empty() || bytes.len() > MAX_ICON_BYTES {
             return Err(CommandError::icon_too_large());
         }
         let mut inner = self.inner.lock().expect("session lock");
@@ -154,6 +155,13 @@ impl UnscrollState {
 
     pub fn take_icon(&self, package: &str) -> Option<Vec<u8>> {
         self.inner.lock().expect("session lock").icons.remove(package)
+    }
+
+    /// Non-removing read of one cached icon. Row re-renders must not lose
+    /// icons, so the bounded `load_app_icon` command peeks here; only
+    /// `take_icon` removes and only a new inspection clears the cache.
+    pub fn peek_icon(&self, package: &str) -> Option<Vec<u8>> {
+        self.inner.lock().expect("session lock").icons.get(package).cloned()
     }
 
     pub fn icon_count(&self) -> usize {

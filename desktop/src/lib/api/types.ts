@@ -88,6 +88,10 @@ export interface AppEntryDto {
   protected: boolean;
   protectedReason: string | null;
   iconCached: boolean;
+  /** True when the snapshot lists this package as a store. */
+  isStore: boolean;
+  /** True when the snapshot lists this package as an install source. */
+  isInstallSource: boolean;
 }
 
 /** Redacted diagnostic preview shown before the user picks an export destination. */

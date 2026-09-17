@@ -8,12 +8,41 @@ export const PROGRESS_EVENT = "unscroll-progress";
 
 export interface ProgressPayload {
   event: ProgressEventName;
-  serial: string;
+  serial: string | null;
   detail: string | null;
 }
 
+/**
+ * Decodes one `unscroll-progress` payload before `normalizeProgressPayload`.
+ * Rust emits canonical JSON text (`{"event", "serial", "detail"}`); older
+ * builds emitted the bare event name. JSON-parse string payloads and fall
+ * back to the bare name (or the original value) when parsing fails — never
+ * throw. Non-string payloads (already-structured objects, Tauri wrapping)
+ * pass through untouched for the workspace normalizer.
+ */
+export function decodeProgressPayload(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return raw;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Subscribes to `unscroll-progress`. The decoded payload stays honest:
+ * Rust emits JSON text (parsed to {@link ProgressPayload} here) while
+ * older builds emitted the bare event name, so handlers receive
+ * `string | ProgressPayload` and must narrow before trusting
+ * `.event`/`.serial` — typically by passing the payload through
+ * `normalizeProgressPayload`. Runtime behavior is decode-then-forward.
+ */
 export function listenProgress(
-  handler: (payload: ProgressPayload) => void,
+  handler: (payload: string | ProgressPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<ProgressPayload>(PROGRESS_EVENT, (wrapped) => handler(wrapped.payload));
+  return listen<string | ProgressPayload>(PROGRESS_EVENT, (wrapped) =>
+    handler(decodeProgressPayload(wrapped.payload) as string | ProgressPayload),
+  );
 }

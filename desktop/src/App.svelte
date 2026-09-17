@@ -3,12 +3,15 @@
   import ConnectScreen from "./lib/screens/ConnectScreen.svelte";
   import ChooseAppsScreen from "./lib/screens/ChooseAppsScreen.svelte";
   import ReviewScreen from "./lib/screens/ReviewScreen.svelte";
+  import { loadAppIcon } from "./lib/api/invoke.ts";
   import {
     STEPS,
     countText,
+    createIconLoader,
     createSelection,
     selectionCounts,
     selectionKeyFor,
+    selectRowIcon,
     toggleSelection,
     type ConnectionState,
     type InspectedInfo,
@@ -42,6 +45,41 @@
   // chooser restores the last inspection instead of re-running discovery.
   let savedSnapshot: WorkspaceSnapshot | null = $state(null);
 
+  // Bounded lazy icons: one loader per inspection (cache Map + in-flight
+  // dedup, fire once per packageId). The transport reads the current
+  // inspected identity at call time; misses/errors resolve to null so rows
+  // render the existing neutral fallback. Identity values stay in memory
+  // for invoke arguments only — never rendered.
+  function makeIconLoader() {
+    return createIconLoader(async (packageId: string) => {
+      const serial = savedSnapshot?.device?.serial;
+      const fingerprint = savedSnapshot?.device?.fingerprint;
+      if (!serial || !fingerprint) return null;
+      const result = await loadAppIcon(serial, fingerprint, packageId);
+      if (!result.ok) return null;
+      return result.value;
+    });
+  }
+
+  let iconLoader = $state(makeIconLoader());
+  let iconTick = $state(0);
+
+  function iconSrcFor(entry: AppEntryDto): string | null {
+    // Subscribe the row render to loader completions.
+    void iconTick;
+    // Fresh-catalog precedence lives in selectRowIcon: a current
+    // iconCached===false beats any stale loader hit from a previous
+    // inspection, so same-set re-inspections never serve dead icons.
+    const decision = selectRowIcon(entry, iconLoader.cached(entry.packageId));
+    if (decision.kind === "load") {
+      void iconLoader.get(entry.packageId).then(() => {
+        iconTick += 1;
+      });
+      return null;
+    }
+    return decision.src;
+  }
+
   function handleState(update: ShellUpdate): void {
     steps = update.steps;
     announcement = update.announcement;
@@ -54,6 +92,11 @@
     entries = info.entries;
     session = info.session;
     inspectedConnection = info.connection;
+    // Every inspection clears the Rust icon cache, so drop this view's
+    // cache/flights too — even when the packageId set is unchanged, the
+    // bytes (or their absence) may differ. selectRowIcon additionally
+    // prefers a current iconCached===false over any lingering hit.
+    iconLoader = makeIconLoader();
   }
 
   function handleSnapshot(snapshot: WorkspaceSnapshot): void {
@@ -68,6 +111,8 @@
     if (key !== selectionKey) {
       selection = createSelection(entries);
       selectionKey = key;
+      // A new inspection may carry new icons: drop the old cache/flights.
+      iconLoader = makeIconLoader();
     }
     view = "choose";
     const counts = selectionCounts(selection, entries);
@@ -117,6 +162,7 @@
     <ChooseAppsScreen
       {entries}
       {selection}
+      {iconSrcFor}
       onToggle={handleToggle}
       onBack={() => {
         view = "connect";

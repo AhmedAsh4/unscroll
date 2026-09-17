@@ -104,3 +104,17 @@ export function exportDiagnostics(
   // missing parent) before touching the filesystem.
   return call("export_diagnostics", { serial, fingerprint, destination });
 }
+
+/**
+ * Bounded per-icon read. Returns the cached icon as an `image/png` data
+ * URL. A missing cache entry resolves to the typed miss
+ * (`{"missing":true}`) — treat any non-`data:` payload (miss, empty, or
+ * error) as the neutral fallback, never as a loud error.
+ */
+export function loadAppIcon(
+  serial: string,
+  fingerprint: string,
+  packageId: string,
+): Promise<InvokeResult<string>> {
+  return call("load_app_icon", { serial, fingerprint, packageId });
+}

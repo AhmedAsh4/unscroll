@@ -32,7 +32,7 @@
 //! `discover_devices`, `inspect_device`, `get_session`, `start_apply`,
 //! `respond_to_decision`, `start_edit`, `open_maintenance`,
 //! `close_maintenance`, `start_restore`, `retry_cleanup`,
-//! `preview_diagnostics`, `export_diagnostics`. Each handler validates with
+//! `preview_diagnostics`, `export_diagnostics`, `load_app_icon`. Each handler validates with
 //! the helpers in this module, gates on the session, delegates to
 //! `device` / `transaction` / `policy` / `recovery`, and emits
 //! [`ProgressEvent::name`] events in [`progress_sequence`] order.

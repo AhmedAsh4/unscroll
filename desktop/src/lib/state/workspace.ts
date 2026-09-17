@@ -332,6 +332,8 @@ function cleanEntry(value: unknown): AppEntryDto | null {
     protected: row["protected"] === true,
     protectedReason: typeof row["protectedReason"] === "string" ? row["protectedReason"] : null,
     iconCached: row["iconCached"] === true,
+    isStore: row["isStore"] === true,
+    isInstallSource: row["isInstallSource"] === true,
   };
 }
 
@@ -649,14 +651,14 @@ export class ConnectionFlow {
 /* never drive a transaction.                                         */
 /*                                                                    */
 /* Icon wiring point (honest backend reality): the inspect boundary   */
-/* currently carries only the `iconCached` flag per entry — no icon   */
-/* bytes cross into the webview, so there is nothing to decode here.  */
-/* `AppRow` therefore takes an `iconSrc: string | null` prop: a       */
-/* resolved local/object URL when a future Task 15 resource mapping   */
-/* provides one, otherwise null. A null (or failed) source renders    */
-/* the neutral local fallback from `fallbackInitial` — the app's      */
-/* initial letter plus its label. Never substitute remote art, a      */
-/* brand catalog, or guessed icons.                                   */
+/* carries only the `iconCached` flag per entry; rows resolve bounded    */
+/* PNG bytes lazily via `loadAppIcon` (`load_app_icon`: session-bound,   */
+/* peek-never-removes, typed miss → fallback). `AppRow` therefore takes  */
+/* an `iconSrc: string | null` prop: a resolved local data URL when the  */
+/* loader provides one, otherwise null. A null (or failed) source        */
+/* renders the neutral local fallback from `fallbackInitial` — the      */
+/* app's initial letter plus its label. Never substitute remote art, a   */
+/* brand catalog, or guessed icons.                                      */
 /* ------------------------------------------------------------------ */
 
 /** Chooser filter. Kept = kept incl. protected; Blocked = not kept. */
@@ -669,10 +671,12 @@ export type SelectionMap = Record<string, boolean>;
 export type PillState = "kept" | "blocked" | "protected" | "store" | "unsupported";
 
 /**
- * Store/sideload-source heuristic. No store or install-source DTOs cross
- * the inspect boundary, so review grouping falls back to whole-token
- * matching against `packageId + label`: the text is lowercased, split on
- * non-alphanumeric boundaries, and matched exactly against STORE_TOKENS.
+ * Store/sideload-source heuristic. The inspect boundary now carries
+ * `isStore` / `isInstallSource` flags per entry (see `cleanEntry`), and
+ * `reviewGroups` / `pillForEntry` prefer those flags whenever present.
+ * This heuristic remains ONLY as a documented fallback for legacy shapes
+ * without flags: the text is lowercased, split on non-alphanumeric
+ * boundaries, and matched exactly against STORE_TOKENS.
  * Whole-token matching matters — substring matching mis-groups ordinary
  * apps such as "VLC Player" (play in player), "Display Tester" (play in
  * display), "SuperMarket List" (market in supermarket), or "Installment
@@ -701,6 +705,26 @@ export function storeTokensFor(entry: AppEntryDto): string[] {
 /** True when the entry looks like a store or sideload source (see heuristic). */
 export function isStoreLike(entry: AppEntryDto): boolean {
   return storeTokensFor(entry).some((token) => STORE_TOKENS.has(token));
+}
+
+/**
+ * True when the DTO carries explicit store flags (the current Rust shape).
+ * Legacy shapes without either flag fall back to `isStoreLike`.
+ */
+function hasStoreFlags(entry: AppEntryDto): boolean {
+  const row = entry as unknown as Record<string, unknown>;
+  return typeof row["isStore"] === "boolean" || typeof row["isInstallSource"] === "boolean";
+}
+
+/** True when a flagged entry is a store or install source. */
+function isFlaggedStore(entry: AppEntryDto): boolean {
+  return entry.isStore === true || entry.isInstallSource === true;
+}
+
+/** True for the stores review group: flags win, heuristic is legacy-only. */
+function isStoreEntry(entry: AppEntryDto): boolean {
+  if (hasStoreFlags(entry)) return isFlaggedStore(entry);
+  return isStoreLike(entry);
 }
 
 /** Protected reasons that mark an entry as unsupported/uncertain. */
@@ -732,7 +756,7 @@ export function pillForEntry(entry: AppEntryDto, kept: boolean): PillState {
     return "protected";
   }
   if (kept) return "kept";
-  if (isStoreLike(entry)) return "store";
+  if (isStoreEntry(entry)) return "store";
   return "blocked";
 }
 
@@ -856,7 +880,7 @@ export function reviewGroups(entries: AppEntryDto[], selection: SelectionMap): R
     }
     if (selection[entry.packageId] === true) {
       groups.kept.push(entry);
-    } else if (isStoreLike(entry)) {
+    } else if (isStoreEntry(entry)) {
       groups.stores.push(entry);
     } else {
       groups.blocked.push(entry);
@@ -905,6 +929,104 @@ export function countText(kept: number, blocked: number, total: number): string 
 export function fallbackInitial(label: string): string {
   const first = label.trim().charAt(0);
   return first === "" ? "?" : first.toUpperCase();
+}
+
+/* ------------------------------------------------------------------ */
+/* Bounded lazy icons (boundary-hardening pass).                        */
+/*                                                                      */
+/* The inspect boundary carries only the `iconCached` flag per entry;   */
+/* rows resolve the bytes lazily via `loadAppIcon` in `../api/invoke.ts`*/
+/* (Rust `load_app_icon`: session-bound, bounded, peek-never-removes).  */
+/* A missing entry is a typed miss (`{"missing":true}`) — every miss,   */
+/* empty payload, garbage string, or loader error resolves to null so   */
+/* rows render the neutral `fallbackInitial` fallback. Never substitute */
+/* remote art, a brand catalog, or guessed icons.                       */
+/* ------------------------------------------------------------------ */
+
+const ICON_DATA_PREFIX = "data:image/png;base64,";
+
+/**
+ * Maps one icon transport value to a renderable source or null.
+ * Only `image/png` data URLs with strict standard-alphabet base64
+ * (correct length and padding) pass; the Rust typed miss, empty strings,
+ * foreign schemes (`javascript:`, `data:image/svg+xml`, …), malformed
+ * payloads, and non-strings all fall back to null (neutral fallback)
+ * instead of reaching the `<img>` element.
+ */
+export function resolveIconSrc(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  if (!value.startsWith(ICON_DATA_PREFIX) || value.length <= ICON_DATA_PREFIX.length) return null;
+  const body = value.slice(ICON_DATA_PREFIX.length);
+  if (body.length === 0 || body.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(body)) return null;
+  const padStart = body.indexOf("=");
+  if (padStart !== -1 && !/^={1,2}$/.test(body.slice(padStart))) return null;
+  return value;
+}
+
+/** Underlying transport for one package: data URL, miss marker, or null. */
+export type IconTransport = (packageId: string) => Promise<unknown>;
+
+export interface IconLoader {
+  /** Resolves to a data URL or null (miss/error → null fallback). */
+  get(packageId: string): Promise<string | null>;
+  /** Synchronous cache probe: data URL, null (known miss), or undefined. */
+  cached(packageId: string): string | null | undefined;
+}
+
+/**
+ * Lazy per-package icon cache with in-flight dedup: concurrent `get`
+ * calls for one packageId share a single transport flight, successes and
+ * misses alike are cached so rows fire once per packageId, and every
+ * failure resolves to null (neutral fallback, never a loud error).
+ */
+export function createIconLoader(load: IconTransport): IconLoader {
+  const cache = new Map<string, string | null>();
+  const inflight = new Map<string, Promise<string | null>>();
+  return {
+    get(packageId: string): Promise<string | null> {
+      const hit = cache.get(packageId);
+      if (hit !== undefined) return Promise.resolve(hit);
+      const running = inflight.get(packageId);
+      if (running !== undefined) return running;
+      const flight = Promise.resolve()
+        .then(() => load(packageId))
+        .then(
+          (value) => resolveIconSrc(value),
+          () => null,
+        )
+        .then((resolved) => {
+          cache.set(packageId, resolved);
+          inflight.delete(packageId);
+          return resolved;
+        });
+      inflight.set(packageId, flight);
+      return flight;
+    },
+    cached(packageId: string): string | null | undefined {
+      return cache.get(packageId);
+    },
+  };
+}
+
+/** Row-level icon decision: a renderable source or a single load request. */
+export type RowIconDecision = { readonly kind: "value"; readonly src: string | null } | { readonly kind: "load" };
+
+/**
+ * Resolves one row's icon with fresh-catalog precedence. When the current
+ * entry says `iconCached === false`, the answer is null even if the loader
+ * still holds a stale hit: Rust clears the icon cache on every inspection,
+ * so a same-packageId entry may go uncached while an old hit lingers.
+ * Loader hits/misses are honored only while the catalog still says
+ * cached; unknown entries request exactly one load.
+ */
+export function selectRowIcon(
+  entry: AppEntryDto,
+  cached: string | null | undefined,
+): RowIconDecision {
+  if (!entry.iconCached) return { kind: "value", src: null };
+  if (cached !== undefined) return { kind: "value", src: cached };
+  return { kind: "load" };
 }
 
 /** Inspected data handed from Connect to the chooser (identity stays out). */

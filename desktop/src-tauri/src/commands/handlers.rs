@@ -1,4 +1,4 @@
-//! Thin async Tauri handlers: the 12 frontend operations.
+//! Thin async Tauri handlers: the 13 frontend operations.
 //!
 //! Every handler follows one shape: validate UI strings with the typed
 //! parsers -> gate on the inspected session binding (`stale-device`) ->
@@ -78,6 +78,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "retry_cleanup",
     "preview_diagnostics",
     "export_diagnostics",
+    "load_app_icon",
 ];
 
 /// Progress-event channel shared with `desktop/src/lib/api/events.ts`.
@@ -93,6 +94,8 @@ pub const APP_ENTRY_DTO_FIELDS: &[&str] = &[
     "protected",
     "protectedReason",
     "iconCached",
+    "isStore",
+    "isInstallSource",
 ];
 pub const DIAGNOSTIC_PREVIEW_DTO_FIELDS: &[&str] = &[
     "deviceModel",
@@ -153,13 +156,48 @@ fn device_unavailable() -> CommandError {
     )
 }
 
-fn emit(app: &AppHandle, event: ProgressEvent) {
-    let _ = app.emit(PROGRESS_CHANNEL, event.name());
+fn emit(app: &AppHandle, event: ProgressEvent, serial: Option<&str>, detail: Option<&str>) {
+    let _ = app.emit(PROGRESS_CHANNEL, progress_payload(event.name(), serial, detail));
 }
 
-fn emit_all(app: &AppHandle, events: &[&str]) {
+fn emit_all(
+    app: &AppHandle,
+    events: &[&str],
+    serial: Option<&str>,
+    decision_package: Option<&str>,
+) {
     for name in events {
-        let _ = app.emit(PROGRESS_CHANNEL, name);
+        // Only the blocking decision carries a detail (the package awaiting
+        // an answer); every other event — including disconnects — carries no
+        // sensitive detail, only the bound serial for correlation.
+        let detail = if *name == ProgressEvent::DecisionRequired.name() {
+            decision_package
+        } else {
+            None
+        };
+        let _ = app.emit(PROGRESS_CHANNEL, progress_payload(name, serial, detail));
+    }
+}
+
+/// Canonical progress payload as JSON text: the stable event name plus the
+/// bound serial (when a session is active) and an event-specific detail
+/// (today only the blocking package for `decision-required`; otherwise
+/// null). Hand-built with the shared [`quote`] helper so no serialization
+/// dependency crosses the boundary. Emitted on [`PROGRESS_CHANNEL`] with
+/// names identical to [`ProgressEvent::name`]; the frontend JSON.parses
+/// string payloads and falls back to the bare name.
+pub fn progress_payload(event: &str, serial: Option<&str>, detail: Option<&str>) -> String {
+    let serial = serial.map(quote).unwrap_or_else(|| "null".to_owned());
+    let detail = detail.map(quote).unwrap_or_else(|| "null".to_owned());
+    format!("{{\"event\":{},\"serial\":{},\"detail\":{}}}", quote(event), serial, detail)
+}
+
+fn decision_package_of(outcome: &crate::transaction::ApplyOutcome) -> Option<String> {
+    match outcome {
+        crate::transaction::ApplyOutcome::DecisionRequired { package } => {
+            Some(package.as_str().to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -360,7 +398,9 @@ fn protected_reason(snapshot: &DeviceSnapshot, package: &str) -> Option<String> 
 
 /// Catalog DTO JSON: the chooser rows plus device identity. `cached` marks
 /// which entries have a bounded icon in session state; the rest render the
-/// neutral local fallback (never guessed brand art).
+/// neutral local fallback (never guessed brand art). `isStore` /
+/// `isInstallSource` come from the snapshot's store and install-source
+/// facts so the frontend groups without guessing from names.
 pub fn catalog_json(snapshot: &DeviceSnapshot, cached: &[bool]) -> String {
     let entries = snapshot
         .catalog
@@ -372,15 +412,25 @@ pub fn catalog_json(snapshot: &DeviceSnapshot, cached: &[bool]) -> String {
                 Some(reason) => ("true", quote(&reason)),
                 None => ("false", "null".to_owned()),
             };
+            let is_store = snapshot
+                .stores
+                .iter()
+                .any(|fact| fact.package.as_str() == app.package.as_str());
+            let is_source = snapshot
+                .install_sources
+                .iter()
+                .any(|fact| fact.package.as_str() == app.package.as_str());
             format!(
-                "{{\"packageId\":{},\"label\":{},\"suspended\":{},\"enabled\":{},\"protected\":{},\"protectedReason\":{},\"iconCached\":{}}}",
+                "{{\"packageId\":{},\"label\":{},\"suspended\":{},\"enabled\":{},\"protected\":{},\"protectedReason\":{},\"iconCached\":{},\"isStore\":{},\"isInstallSource\":{}}}",
                 quote(app.package.as_str()),
                 quote(&app.label),
                 app.suspended,
                 app.enabled,
                 protected,
                 reason,
-                cached.get(index).copied().unwrap_or(false)
+                cached.get(index).copied().unwrap_or(false),
+                is_store,
+                is_source
             )
         })
         .collect::<Vec<_>>()
@@ -460,6 +510,72 @@ pub fn restore_outcome_json(outcome: &crate::transaction::RestoreOutcome) -> Str
     format!("{{\"outcome\":{}}}", quote(restore_outcome_name(outcome)))
 }
 
+// --- Bounded icon bytes -----------------------------------------------------
+
+use crate::app_state::MAX_ICON_BYTES as ICON_BYTE_BOUND;
+
+/// Hand-rolled base64 (standard alphabet) so no serialization crate crosses
+/// the boundary. Pads to a multiple of 4 with `=` per RFC 4648.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 63) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Encode cached PNG bytes as an `image/png` data URL. Rejects oversize
+/// payloads with `icon-too-large` so a hostile cache entry cannot exhaust
+/// the webview; empty payloads are likewise rejected (the caller maps a
+/// missing entry to the typed miss below, never to this error).
+pub fn icon_data_url(bytes: &[u8]) -> Result<String, CommandError> {
+    if bytes.is_empty() || bytes.len() > ICON_BYTE_BOUND {
+        return Err(CommandError::icon_too_large());
+    }
+    Ok(format!("data:image/png;base64,{}", base64_encode(bytes)))
+}
+
+/// Miss marker for `load_app_icon`: a cache miss is `Ok`, never a loud
+/// error — the frontend treats any non-`data:` payload (this marker,
+/// empty, or a typed error) as the neutral fallback.
+pub const ICON_MISS_JSON: &str = "{\"missing\":true}";
+
+/// Pure core of `load_app_icon`, testable without an `AppHandle`: validate
+/// the typed inputs, gate on the inspected session binding (`stale-device`),
+/// then peek (never remove) the bounded icon cache. A missing entry returns
+/// the typed miss (`Ok(ICON_MISS_JSON)`); oversize bytes fail closed with
+/// `icon-too-large`; bad packages fail with `invalid-package-id`.
+pub fn load_icon_data_url(
+    state: &UnscrollState,
+    serial: &str,
+    fingerprint: &str,
+    package_id: &str,
+) -> Result<String, String> {
+    let package = super::validate_package(package_id).map_err(err_json)?;
+    device_edge::check_session(state, serial, fingerprint).map_err(err_json)?;
+    match state.peek_icon(package.as_str()) {
+        None => Ok(ICON_MISS_JSON.to_owned()),
+        Some(bytes) => icon_data_url(&bytes).map_err(err_json),
+    }
+}
+
 // --- Handlers ---------------------------------------------------------------
 
 #[tauri::command]
@@ -479,7 +595,7 @@ pub async fn inspect_device(
 ) -> Result<String, String> {
     let serial = validate_serial(&serial).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(serial.as_str()), None);
     let mut adb = adb_for(&app).map_err(err_json)?;
     let Discovery::One { serial: found } =
         crate::device::discover(&mut adb).map_err(|error| err_json(device_edge::map_discovery_error(&error)))?;
@@ -496,7 +612,7 @@ pub async fn inspect_device(
         .iter()
         .map(|app| state.store_icon(app.package.as_str(), app.icon.clone()).is_ok())
         .collect();
-    emit(&app, ProgressEvent::Completed);
+    emit(&app, ProgressEvent::Completed, Some(serial.as_str()), None);
     Ok(catalog_json(&snapshot, &cached))
 }
 
@@ -559,7 +675,7 @@ pub async fn start_apply(
 ) -> Result<String, String> {
     let allowed = validate_apply_request(&state, &serial, &fingerprint, &allowed).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(&serial), None);
     let serial_text = serial.clone();
     let (serial_typed, fingerprint_typed) =
         device_edge::validate_inspect_request(&serial, &fingerprint).map_err(err_json)?;
@@ -571,7 +687,9 @@ pub async fn start_apply(
             read_working_envelope(&mut txn, CODE_PLAN_REJECTED).map_err(err_json)?;
         let result = apply(&mut txn, envelope, &plan, None).map_err(|error| err_json(map_apply_error(error)))?;
         discard_on_terminal(&state, &serial_text, &result.outcome);
-        emit_all(&app, &policy_edge::apply_progress(&result.outcome));
+        let tail = policy_edge::apply_progress(&result.outcome);
+        let detail = decision_package_of(&result.outcome);
+        emit_all(&app, &tail, Some(&serial_text), detail.as_deref());
         return Ok(apply_outcome_json(&result.outcome, &result.partial_protection));
     }
     let mut adb = adb_for(&app).map_err(err_json)?;
@@ -631,7 +749,9 @@ pub async fn start_apply(
     let envelope = read_working_envelope(&mut txn, CODE_PLAN_REJECTED).map_err(err_json)?;
     let result = apply(&mut txn, envelope, &plan, None).map_err(|error| err_json(map_apply_error(error)))?;
     discard_on_terminal(&state, &serial_text, &result.outcome);
-    emit_all(&app, &policy_edge::apply_progress(&result.outcome));
+    let tail = policy_edge::apply_progress(&result.outcome);
+    let detail = decision_package_of(&result.outcome);
+    emit_all(&app, &tail, Some(&serial_text), detail.as_deref());
     Ok(apply_outcome_json(&result.outcome, &result.partial_protection))
 }
 
@@ -646,7 +766,7 @@ pub async fn respond_to_decision(
     let decision = validate_decision(&decision).map_err(err_json)?;
     device_edge::check_session(&state, &serial, &fingerprint).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(&serial), None);
     let serial_text = serial.clone();
     let (serial_typed, fingerprint_typed) =
         device_edge::validate_inspect_request(&serial, &fingerprint).map_err(err_json)?;
@@ -663,7 +783,9 @@ pub async fn respond_to_decision(
     let result = apply(&mut txn, envelope, &plan, Some(decision))
         .map_err(|error| err_json(map_apply_error(error)))?;
     discard_on_terminal(&state, &serial_text, &result.outcome);
-    emit_all(&app, &policy_edge::apply_progress(&result.outcome));
+    let tail = policy_edge::apply_progress(&result.outcome);
+    let detail = decision_package_of(&result.outcome);
+    emit_all(&app, &tail, Some(&serial_text), detail.as_deref());
     Ok(apply_outcome_json(&result.outcome, &result.partial_protection))
 }
 
@@ -740,7 +862,7 @@ pub async fn start_restore(
     recovery_edge::validate_restore_confirmation(&confirmation).map_err(err_json)?;
     device_edge::check_session(&state, &serial, &fingerprint).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(&serial), None);
     let (serial_typed, fingerprint_typed) =
         device_edge::validate_inspect_request(&serial, &fingerprint).map_err(err_json)?;
     let mut adb = adb_for(&app).map_err(err_json)?;
@@ -750,7 +872,8 @@ pub async fn start_restore(
         read_working_envelope(&mut backend, super::CODE_RESTORE_BLOCKED).map_err(err_json)?;
     let result = crate::transaction::restore(&mut backend, envelope, &confirmation)
         .map_err(|error| err_json(recovery_edge::map_restore_error(&error)))?;
-    emit_all(&app, &recovery_edge::restore_progress(&result.outcome));
+    let tail = recovery_edge::restore_progress(&result.outcome);
+    emit_all(&app, &tail, Some(&serial), None);
     Ok(restore_outcome_json(&result.outcome))
 }
 
@@ -763,7 +886,7 @@ pub async fn retry_cleanup(
 ) -> Result<String, String> {
     device_edge::check_session(&state, &serial, &fingerprint).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(&serial), None);
     let (serial_typed, fingerprint_typed) =
         device_edge::validate_inspect_request(&serial, &fingerprint).map_err(err_json)?;
     let mut adb = adb_for(&app).map_err(err_json)?;
@@ -773,7 +896,7 @@ pub async fn retry_cleanup(
         read_working_envelope(&mut backend, super::CODE_RESTORE_BLOCKED).map_err(err_json)?;
     crate::transaction::retry_cleanup(&mut backend, envelope)
         .map_err(|error| err_json(recovery_edge::map_restore_error(&error)))?;
-    emit(&app, ProgressEvent::Completed);
+    emit(&app, ProgressEvent::Completed, Some(&serial), None);
     Ok("{\"cleaned\":true}".to_owned())
 }
 
@@ -807,7 +930,7 @@ pub async fn export_diagnostics(
     let path = diagnostics_edge::canonicalize_export_path(&destination).map_err(err_json)?;
     device_edge::check_session(&state, &serial, &fingerprint).map_err(err_json)?;
     let _guard = state.begin_mutation().map_err(err_json)?;
-    emit(&app, ProgressEvent::Started);
+    emit(&app, ProgressEvent::Started, Some(&serial), None);
     let (serial_typed, fingerprint_typed) =
         device_edge::validate_inspect_request(&serial, &fingerprint).map_err(err_json)?;
     let fingerprint_text = fingerprint_typed.as_str().to_owned();
@@ -817,6 +940,27 @@ pub async fn export_diagnostics(
         read_working_envelope(&mut txn, super::CODE_EXPORT_FAILED).map_err(err_json)?;
     let bundle = diagnostics_edge::preview_bundle(&envelope, "", &fingerprint_text);
     diagnostics_edge::write_diagnostic_export(&path, &bundle.redacted_envelope).map_err(err_json)?;
-    emit(&app, ProgressEvent::Completed);
+    emit(&app, ProgressEvent::Completed, Some(&serial), None);
     Ok("{\"exported\":true}".to_owned())
+}
+
+/// Bounded per-icon read for chooser rows. The inspect boundary only says
+/// which entries are cached (`iconCached`); rows resolve the bytes lazily
+/// through this command so a 500-row catalog never moves megabytes at
+/// once. The read peeks (never removes): re-renders keep their icons until
+/// the next inspection clears the cache.
+///
+/// Miss-vs-error contract (documented for the frontend): a missing cache
+/// entry is `Ok(ICON_MISS_JSON)` — a typed miss the row maps to the
+/// neutral fallback, never a loud error. Typed errors are reserved for
+/// bad inputs (`invalid-package-id`), a replaced device (`stale-device`),
+/// and oversize bytes (`icon-too-large`).
+#[tauri::command]
+pub async fn load_app_icon(
+    state: State<'_, UnscrollState>,
+    serial: String,
+    fingerprint: String,
+    #[allow(non_snake_case)] packageId: String,
+) -> Result<String, String> {
+    load_icon_data_url(&state, &serial, &fingerprint, &packageId)
 }

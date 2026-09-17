@@ -21,7 +21,8 @@ pub fn run() {
             commands::handlers::start_restore,
             commands::handlers::retry_cleanup,
             commands::handlers::preview_diagnostics,
-            commands::handlers::export_diagnostics
+            commands::handlers::export_diagnostics,
+            commands::handlers::load_app_icon
         ])
         .run(tauri::generate_context!())
         .expect("error while running Unscroll");

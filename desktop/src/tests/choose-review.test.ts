@@ -39,6 +39,10 @@ import {
 import type { AppEntryDto } from "../lib/api/types.ts";
 
 function entry(overrides: Partial<AppEntryDto> & { packageId: string; label: string }): AppEntryDto {
+  // Legacy shape (no store flags): existing suites keep exercising the
+  // whole-token heuristic fallback. Flagged coverage lives in
+  // boundary-hardening.test.ts. The cast keeps the required-flags DTO
+  // honest for new payloads while preserving these legacy fixtures.
   return {
     suspended: false,
     enabled: true,
@@ -46,7 +50,7 @@ function entry(overrides: Partial<AppEntryDto> & { packageId: string; label: str
     protectedReason: null,
     iconCached: false,
     ...overrides,
-  };
+  } as AppEntryDto;
 }
 
 describe("createSelection is allowlist-first and keyed by packageId", () => {
