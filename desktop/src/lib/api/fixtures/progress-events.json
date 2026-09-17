@@ -1,0 +1,15 @@
+[
+  "started",
+  "operation-applied",
+  "decision-required",
+  "chooser-required",
+  "rollback-started",
+  "rollback-applied",
+  "completed",
+  "disconnected",
+  "maintenance-opened",
+  "maintenance-closed",
+  "restore-started",
+  "restore-completed",
+  "inconsistent-state"
+]

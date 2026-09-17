@@ -1,0 +1,7 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "Minimal Unscroll webview access: core window, app, event, and resource APIs only (the pinned Tauri 2 build autogenerates core:default from those core plugins; shell, process, filesystem, dialog, notification, updater, and HTTP plugins are not dependencies, so they cannot be granted). Device access, exports, and diagnostics stay behind the Rust boundary. Handoff for Tasks 18/19: the webview has no save-dialog permission, so diagnostic export takes only explicit absolute destinations until a save-picker affordance lands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

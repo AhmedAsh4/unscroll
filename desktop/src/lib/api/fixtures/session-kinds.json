@@ -1,0 +1,10 @@
+[
+  "new-setup",
+  "active-policy",
+  "maintenance-recovery",
+  "resumable-transaction",
+  "rollback-only",
+  "restore-ready",
+  "cleanup-retry",
+  "blocked-inconsistency"
+]
