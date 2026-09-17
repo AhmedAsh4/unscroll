@@ -5,17 +5,39 @@
   import ReviewScreen from "./lib/screens/ReviewScreen.svelte";
   import ApplyScreen from "./lib/screens/ApplyScreen.svelte";
   import CompletionScreen from "./lib/screens/CompletionScreen.svelte";
+  import ActivePolicyScreen from "./lib/screens/ActivePolicyScreen.svelte";
+  import MaintenanceScreen from "./lib/screens/MaintenanceScreen.svelte";
+  import RestoreScreen from "./lib/screens/RestoreScreen.svelte";
+  import DiagnosticsScreen from "./lib/screens/DiagnosticsScreen.svelte";
   import { discoverDevices, loadAppIcon, respondToDecision, startApply } from "./lib/api/invoke.ts";
+  import {
+    closeMaintenance,
+    exportDiagnostics,
+    openMaintenance,
+    previewDiagnostics,
+    retryCleanup,
+    startEdit,
+    startRestore,
+  } from "./lib/api/invoke.ts";
   import {
     ApplyFlow,
     STEPS,
+    DiagnosticsFlow,
+    EditFlow,
+    MaintenanceFlow,
+    RestoreFlow,
     allowlistFor,
     applyBlockReason,
     canApply,
+    canExitMaintenance,
     countText,
     createIconLoader,
     createSelection,
     isApplyComplete,
+    isPolicyReconciled,
+    maintenanceExitBlockReason,
+    policyFlowKeyFor,
+    routeForSession,
     selectionCounts,
     selectionKeyFor,
     selectRowIcon,
@@ -31,7 +53,7 @@
   } from "./lib/state/workspace.ts";
   import type { AppEntryDto } from "./lib/api/types.ts";
 
-  type View = "connect" | "choose" | "review" | "apply" | "complete";
+  type View = "connect" | "choose" | "review" | "apply" | "complete" | "policy" | "maintenance" | "restore" | "diagnostics";
 
   let steps: StepState[] = $state(STEPS.map((step, index) => ({ ...step, status: index === 0 ? "active" as const : "pending" as const })));
   let announcement = $state("");
@@ -59,6 +81,27 @@
   // Bumped by the flow on every mutation so the apply view re-reads the
   // latest snapshot (the flow object itself is not deeply reactive).
   let applyTick = $state(0);
+
+  // Task 19 policy views: the policy selection stays separate from the
+  // new-setup chooser selection, and each flow is built lazily from the
+  // reconciled inspection when its view opens. Identity values stay in
+  // memory for invoke arguments only and are never rendered.
+  let policySelection: SelectionMap = $state({});
+  let policySelectionKey: string | null = $state(null);
+  let policyBaseAllowed: string[] = $state([]);
+  let editFlow: EditFlow | null = $state(null);
+  let editTick = $state(0);
+  let maintenanceFlow: MaintenanceFlow | null = $state(null);
+  let maintenanceTick = $state(0);
+  let restoreFlow: RestoreFlow | null = $state(null);
+  let restoreTick = $state(0);
+  let diagnosticsFlow: DiagnosticsFlow | null = $state(null);
+  let diagnosticsTick = $state(0);
+  // Identity of the inspection the policy flows belong to. Flows persist
+  // across policy-view navigation and reset only when a new inspection or
+  // a changed session arrives, so retained states (an open window, a
+  // cleanup-retry) survive backing out and re-entering a view.
+  let policyFlowKey: string | null = $state(null);
 
   // Bounded lazy icons: one loader per inspection (cache Map + in-flight
   // dedup, fire once per packageId). The transport reads the current
@@ -174,6 +217,175 @@
     return promise as Promise<ApplyInvokeResult>;
   }
 
+  // Reconciled policy entry: a non-new-setup session on a settled
+  // connection routes to policy options instead of a fresh setup.
+  const policyEntry = $derived.by(() => {
+    if (!savedSnapshot || !savedSnapshot.session) return null;
+    if (!isPolicyReconciled(savedSnapshot.connection, savedSnapshot.session)) return null;
+    return routeForSession(savedSnapshot.session.kind);
+  });
+
+  const policyEntries: AppEntryDto[] = $derived.by(() => savedSnapshot?.entries ?? []);
+  const policySession: SessionDto | null = $derived.by(() => savedSnapshot?.session ?? null);
+  const policyConnection: ConnectionState = $derived.by(() => savedSnapshot?.connection ?? "idle");
+
+  // Recorded changes for the restore summary: the diagnostics preview
+  // operations when loaded, otherwise an empty list with guidance.
+  const restoreChanges: string[] = $derived.by(() => diagnosticsFlow?.snapshot.preview?.operations ?? []);
+
+  function policyIdentity(): { serial: string; fingerprint: string } | null {
+    const serial = savedSnapshot?.device?.serial;
+    const fingerprint = savedSnapshot?.device?.fingerprint;
+    if (!serial || !fingerprint) {
+      announcement = "The inspected phone is no longer available. Check the connection and inspect again.";
+      return null;
+    }
+    return { serial, fingerprint };
+  }
+
+  function goToPolicy(): void {
+    if (!savedSnapshot || !savedSnapshot.session) return;
+    // New inspection or changed session: drop the policy flows (and their
+    // retained states) with it. Otherwise keep the live flows so retained
+    // states survive backing out and re-entering a view.
+    const flowKey = policyFlowKeyFor(
+      savedSnapshot.device?.serial ?? null,
+      savedSnapshot.device?.fingerprint ?? null,
+      savedSnapshot.session,
+    );
+    if (flowKey !== policyFlowKey) {
+      policyFlowKey = flowKey;
+      editFlow = null;
+      maintenanceFlow = null;
+      restoreFlow = null;
+      diagnosticsFlow = null;
+    }
+    const key = selectionKeyFor(policyEntries);
+    if (key !== policySelectionKey) {
+      policySelection = createSelection(policyEntries);
+      policySelectionKey = key;
+      iconLoader = makeIconLoader();
+    }
+    policyBaseAllowed = allowlistFor(policyEntries, policySelection);
+    view = "policy";
+    const route = routeForSession(savedSnapshot.session.kind);
+    announcement = `${route.title}. ${route.body}`;
+  }
+
+  function handlePolicyToggle(packageId: string): void {
+    const target = policyEntries.find((row: AppEntryDto) => row.packageId === packageId);
+    if (!target) return;
+    policySelection = toggleSelection(policySelection, target);
+  }
+
+  function announceFromFlow(message: string): void {
+    announcement = message;
+  }
+
+  function goToMaintenance(): void {
+    const identity = policyIdentity();
+    if (!identity) return;
+    // Preserved across navigation: re-entering keeps an open window or a
+    // failed close instead of discarding it. Reset happens in goToPolicy
+    // on a new inspection or session change.
+    if (!maintenanceFlow) {
+      maintenanceFlow = new MaintenanceFlow(
+        { serial: identity.serial, fingerprint: identity.fingerprint },
+        {
+          discoverDevices: () => wrapApply(discoverDevices()),
+          openMaintenance: (serial, fingerprint, confirmation) =>
+            wrapApply(openMaintenance(serial, fingerprint, confirmation)),
+          closeMaintenance: (serial, fingerprint, approved, scanned) =>
+            wrapApply(closeMaintenance(serial, fingerprint, approved, scanned)),
+        },
+        {
+          announce: announceFromFlow,
+          onChange: () => {
+            maintenanceTick += 1;
+          },
+        },
+      );
+    }
+    view = "maintenance";
+    announcement = "Store maintenance. Nothing opens until the typed acknowledgment matches exactly.";
+  }
+
+  function goToRestore(): void {
+    const identity = policyIdentity();
+    if (!identity) return;
+    // Preserved across navigation: re-entering keeps a retained
+    // cleanup-retry (with its retry action) instead of an idle flow that
+    // could repeat restored mutations. Reset happens in goToPolicy on a
+    // new inspection or session change.
+    if (!restoreFlow) {
+      restoreFlow = new RestoreFlow(
+        { serial: identity.serial, fingerprint: identity.fingerprint },
+        {
+          discoverDevices: () => wrapApply(discoverDevices()),
+          startRestore: (serial, fingerprint, confirmation) =>
+            wrapApply(startRestore(serial, fingerprint, confirmation)),
+          respondToDecision: (serial, fingerprint, decision) =>
+            wrapApply(respondToDecision(serial, fingerprint, decision)),
+          retryCleanup: (serial, fingerprint) => wrapApply(retryCleanup(serial, fingerprint)),
+        },
+        {
+          announce: announceFromFlow,
+          onChange: () => {
+            restoreTick += 1;
+          },
+        },
+      );
+    }
+    view = "restore";
+    announcement = "Restore phone. Nothing restores until the typed confirmation matches exactly.";
+  }
+
+  function goToDiagnostics(): void {
+    const identity = policyIdentity();
+    if (!identity) return;
+    if (!diagnosticsFlow) {
+      diagnosticsFlow = new DiagnosticsFlow(
+        { serial: identity.serial, fingerprint: identity.fingerprint },
+        {
+          previewDiagnostics: (serial, fingerprint) => wrapApply(previewDiagnostics(serial, fingerprint)),
+          exportDiagnostics: (serial, fingerprint, destination) =>
+            wrapApply(exportDiagnostics(serial, fingerprint, destination)),
+        },
+        {
+          announce: announceFromFlow,
+          onChange: () => {
+            diagnosticsTick += 1;
+          },
+        },
+      );
+    }
+    view = "diagnostics";
+    announcement = "Diagnostics. Preview the redacted report before choosing an export destination.";
+  }
+
+  function handleStartEdit(allowed: string[]): void {
+    const identity = policyIdentity();
+    if (!identity) return;
+    if (!editFlow) {
+      editFlow = new EditFlow(
+        { serial: identity.serial, fingerprint: identity.fingerprint, allowed, entries: policyEntries },
+        {
+          discoverDevices: () => wrapApply(discoverDevices()),
+          startEdit: (serial, fingerprint, allowlist) => wrapApply(startEdit(serial, fingerprint, allowlist)),
+        },
+        {
+          announce: announceFromFlow,
+          onChange: () => {
+            editTick += 1;
+          },
+        },
+      );
+    } else {
+      editFlow.updateAllowed(allowed);
+    }
+    void editFlow.start();
+  }
+
   function handleApply(): void {
     // Real Task 18 flow: Review's gate is re-checked here (and again inside
     // the apply view), the allowlist derives from kept packageIds, and the
@@ -231,6 +443,15 @@
       autoStart={savedSnapshot === null}
       onSnapshot={handleSnapshot}
     />
+    {#if policyEntry}
+      <section class="policy-entry" aria-label="Phone policy options">
+        <h2 class="policy-entry-title">{policyEntry.title}</h2>
+        <p class="policy-entry-body">{policyEntry.body}</p>
+        <button type="button" class="u-button-primary" onclick={goToPolicy}>
+          Continue to policy options
+        </button>
+      </section>
+    {/if}
   {:else if view === "choose"}
     <ChooseAppsScreen
       {entries}
@@ -264,6 +485,70 @@
     {#if applyFlow !== null}
       <CompletionScreen partialProtection={applyFlow.snapshot.partialProtection} />
     {/if}
+  {:else if view === "policy"}
+    <ActivePolicyScreen
+      session={policySession}
+      connection={policyConnection}
+      entries={policyEntries}
+      selection={policySelection}
+      activeAllowed={policyBaseAllowed}
+      {iconSrcFor}
+      onToggle={handlePolicyToggle}
+      {editFlow}
+      {editTick}
+      onStartEdit={handleStartEdit}
+      onOpenMaintenance={goToMaintenance}
+      onOpenRestore={goToRestore}
+      onOpenDiagnostics={goToDiagnostics}
+      onBack={() => {
+        view = "connect";
+      }}
+      onAnnounce={handleAnnounce}
+    />
+  {:else if view === "maintenance"}
+    {#if maintenanceFlow !== null}
+      <MaintenanceScreen
+        flow={maintenanceFlow}
+        tick={maintenanceTick}
+        onBack={() => {
+          // While the window is still recorded open, Back stays in the
+          // maintenance view with its guard instead of reaching policy
+          // options (and edit/restore beyond them).
+          if (maintenanceFlow && !canExitMaintenance(maintenanceFlow.snapshot)) {
+            announcement =
+              maintenanceExitBlockReason(maintenanceFlow.snapshot) ??
+              "Store maintenance is still open. Close maintenance first.";
+            return;
+          }
+          view = "policy";
+        }}
+        onAnnounce={handleAnnounce}
+      />
+    {/if}
+  {:else if view === "restore"}
+    {#if restoreFlow !== null}
+      <RestoreScreen
+        flow={restoreFlow}
+        tick={restoreTick}
+        changes={restoreChanges}
+        onBack={() => {
+          view = "policy";
+        }}
+        onOpenDiagnostics={goToDiagnostics}
+        onAnnounce={handleAnnounce}
+      />
+    {/if}
+  {:else if view === "diagnostics"}
+    {#if diagnosticsFlow !== null}
+      <DiagnosticsScreen
+        flow={diagnosticsFlow}
+        tick={diagnosticsTick}
+        onBack={() => {
+          view = "policy";
+        }}
+        onAnnounce={handleAnnounce}
+      />
+    {/if}
   {:else}
     <ReviewScreen
       {entries}
@@ -277,3 +562,28 @@
     />
   {/if}
 </AppShell>
+
+<style>
+  .policy-entry {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    background: var(--unscroll-card);
+    border: 1px solid var(--unscroll-border);
+    border-radius: var(--unscroll-radius-small);
+    padding: 14px 16px;
+  }
+
+  .policy-entry-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+  }
+
+  .policy-entry-body {
+    margin: 0;
+    max-width: 72ch;
+    color: var(--unscroll-muted);
+  }
+</style>

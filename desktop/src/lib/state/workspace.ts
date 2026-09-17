@@ -19,7 +19,8 @@
  *   `{serial,model,manufacturer,api,entries}` or the legacy entries array;
  *   see `parseInspectResult`.
  */
-import type { AppEntryDto, CommandError, CommandErrorCode, SessionDto, SessionKindName } from "../api/types.ts";
+import type { AppEntryDto, CommandError, CommandErrorCode, DiagnosticPreviewDto, SessionActionName, SessionDto, SessionKindName } from "../api/types.ts";
+import { MAINTENANCE_CONFIRMATION, RESTORE_CONFIRMATION } from "../api/types.ts";
 import type { InvokeResult } from "../api/invoke.ts";
 
 export type { CommandError, SessionDto };
@@ -1536,3 +1537,1218 @@ export class ApplyFlow {
     }
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Task 19: active-policy, maintenance, restore, and diagnostics.       */
+/*                                                                     */
+/* Pure presentation mapping over the Task 15 boundary, mirroring the  */
+/* Task 18 ApplyFlow shape: each flow re-checks the live device        */
+/* before any call, collapses concurrent starts, never restarts a      */
+/* terminal flow, and announces each state change exactly once         */
+/* through the injected `announce` callback (the shell renders it in   */
+/* its single polite region). Progress payloads arrive as JSON text    */
+/* and are decoded with the same local `decodeJsonText`, then narrowed */
+/* with `normalizeProgressPayload`. Nothing here builds device         */
+/* requests or plans; screens pass validated strings through the       */
+/* invoke.ts helpers. Identity values stay in memory for invoke        */
+/* arguments only. The baseline is never replaced by an edit: the      */
+/* edit view shows only the planned delta against the active policy.   */
+/* The typed confirmations below re-export the boundary phrases so     */
+/* screens and tests share one source with `../api/types.ts`.          */
+/* ------------------------------------------------------------------ */
+
+/** Exact typed phrase that opens store maintenance. */
+export const MAINTENANCE_CONFIRMATION_TEXT = MAINTENANCE_CONFIRMATION;
+
+/** Exact typed phrase that starts a restore. */
+export const RESTORE_CONFIRMATION_TEXT = RESTORE_CONFIRMATION;
+
+/** Connections where a reconciled session can offer policy actions. */
+const POLICY_CONNECTIONS: ReadonlySet<ConnectionState> = new Set([
+  "ready",
+  "recovery-required",
+  "maintenance-recovery",
+]);
+
+/**
+ * True only after successful reconciliation: a non-null session with a
+ * non-new-setup kind on a settled connection. Edit and restore
+ * affordances check this first and render a reason until it holds.
+ */
+export function isPolicyReconciled(
+  connection: ConnectionState,
+  session: SessionDto | null,
+): boolean {
+  if (session === null || session.kind === "new-setup") return false;
+  return POLICY_CONNECTIONS.has(connection);
+}
+
+/** UI routes a reconciled session class may offer (presentation only). */
+export type PolicyAction =
+  | "edit"
+  | "maintenance"
+  | "restore"
+  | "retry-cleanup"
+  | "diagnostics"
+  | "close-maintenance"
+  | "resume"
+  | "rollback"
+  | "export-diagnostics"
+  | "begin-setup";
+
+/**
+ * Route table for every reconciled session class. A maintenance window
+ * that is still open offers only a verified close plus diagnostics:
+ * edit, restore, and a new window wait until the close verifies.
+ * Blocked histories offer only the diagnostic export.
+ */
+export function policyActionsFor(kind: SessionKindName): PolicyAction[] {
+  switch (kind) {
+    case "new-setup":
+      return ["begin-setup"];
+    case "active-policy":
+      return ["edit", "maintenance", "restore", "diagnostics"];
+    case "maintenance-recovery":
+      return ["close-maintenance", "diagnostics"];
+    case "resumable-transaction":
+      return ["resume", "rollback", "diagnostics"];
+    case "rollback-only":
+      return ["rollback", "diagnostics"];
+    case "restore-ready":
+      return ["restore", "diagnostics"];
+    case "cleanup-retry":
+      return ["retry-cleanup", "diagnostics"];
+    case "blocked-inconsistency":
+      return ["export-diagnostics"];
+  }
+}
+
+/**
+ * Only actions the recovery engine has proven safe for the session.
+ * Mirrors the Rust allowed-actions table: blocked and missing histories
+ * keep diagnostic export only, rollback-only keeps rollback, and a
+ * resumable transaction keeps resume and rollback without restore.
+ */
+export function safeRecoveryActions(session: SessionDto | null): SessionActionName[] {
+  if (session === null) return ["export-diagnostics"];
+  switch (session.kind) {
+    case "new-setup":
+      return ["begin-setup"];
+    case "active-policy":
+      return ["restore", "export-diagnostics"];
+    case "maintenance-recovery":
+      return ["export-diagnostics"];
+    case "resumable-transaction":
+      return ["resume", "rollback", "export-diagnostics"];
+    case "rollback-only":
+      return ["rollback", "export-diagnostics"];
+    case "restore-ready":
+      return ["restore", "export-diagnostics"];
+    case "cleanup-retry":
+      return ["retry-cleanup", "export-diagnostics"];
+    case "blocked-inconsistency":
+      return ["export-diagnostics"];
+  }
+}
+
+/** Edit is available only on a reconciled active policy. */
+export function canEditPolicy(connection: ConnectionState, session: SessionDto | null): boolean {
+  return isPolicyReconciled(connection, session) && session?.kind === "active-policy";
+}
+
+/** Restore is available on reconciled active-policy and restore-ready sessions. */
+export function canRestorePolicy(connection: ConnectionState, session: SessionDto | null): boolean {
+  if (!isPolicyReconciled(connection, session)) return false;
+  return session?.kind === "active-policy" || session?.kind === "restore-ready";
+}
+
+/**
+ * Plain-text reason policy management is gated (null when edit or
+ * restore is available). Rendered as text next to the disabled
+ * control, never silent and never color alone.
+ */
+export function policyGateReason(
+  connection: ConnectionState,
+  session: SessionDto | null,
+): string | null {
+  if (canEditPolicy(connection, session) || canRestorePolicy(connection, session)) return null;
+  if (session === null) {
+    return "Reconnect and inspect the phone before managing its policy. Nothing can change until the session is reconciled.";
+  }
+  if (session.kind === "new-setup") {
+    return "No Unscroll policy was found on this phone. Continue with Choose apps instead of policy management.";
+  }
+  if (!isPolicyReconciled(connection, session)) {
+    return "Reconnect and reconcile the session before managing its policy. Nothing can change until reconciliation succeeds.";
+  }
+  if (session.kind === "maintenance-recovery") {
+    return "A store maintenance window is still open. Close maintenance first; edit, restore, and a new window wait until the close verifies.";
+  }
+  return routeForSession(session.kind).body;
+}
+
+/**
+ * True while a maintenance window is still recorded open: the session
+ * must close it before edit, restore, or a new window.
+ */
+export function requiresCloseFirst(connection: ConnectionState, session: SessionDto | null): boolean {
+  void connection;
+  return session !== null && session.kind === "maintenance-recovery";
+}
+
+export interface EditDelta {
+  /** Proposed allowlist entries outside the active policy. */
+  addedToKeep: string[];
+  /** Active-policy entries the proposal would stop keeping. */
+  addedToBlock: string[];
+}
+
+/**
+ * Planned edit delta: the active policy stays the reference and only
+ * the two change lists render. Both lists are sorted so the summary
+ * reads the same on every render.
+ */
+export function computeEditDelta(active: string[], next: string[]): EditDelta {
+  const before = new Set(active);
+  const after = new Set(next);
+  const addedToKeep = [...after].filter((item) => !before.has(item)).sort();
+  const addedToBlock = [...before].filter((item) => !after.has(item)).sort();
+  return { addedToKeep, addedToBlock };
+}
+
+/** True only for the exact maintenance warning acknowledgment. */
+export function isMaintenanceConfirmation(value: string): boolean {
+  return value === MAINTENANCE_CONFIRMATION;
+}
+
+/** Mismatch reason naming the exact phrase (null when exact). */
+export function maintenanceConfirmReason(value: string): string | null {
+  if (value === MAINTENANCE_CONFIRMATION) return null;
+  return `Type ${MAINTENANCE_CONFIRMATION} exactly to open store maintenance. Nothing opens until the phrase matches.`;
+}
+
+/** True only for the exact restore confirmation. */
+export function isRestoreConfirmation(value: string): boolean {
+  return value === RESTORE_CONFIRMATION;
+}
+
+/** Mismatch reason naming the exact phrase (null when exact). */
+export function restoreConfirmReason(value: string): string | null {
+  if (value === RESTORE_CONFIRMATION) return null;
+  return `Type ${RESTORE_CONFIRMATION} exactly to begin restoring. Nothing restores until the phrase matches.`;
+}
+
+/** Terminal restore outcomes reported by the backend envelope. */
+export const RESTORE_OUTCOMES = [
+  "complete",
+  "chooser-required",
+  "cleanup-retry",
+  "blocked",
+  "recoverable-disconnect",
+] as const;
+
+export type RestoreOutcomeName = (typeof RESTORE_OUTCOMES)[number];
+
+const RESTORE_OUTCOME_SET: ReadonlySet<string> = new Set(RESTORE_OUTCOMES);
+
+/** Parsed backend restore envelope: the terminal outcome name. */
+export interface RestoreOutcomeDto {
+  outcome: RestoreOutcomeName;
+}
+
+/**
+ * Parses one start-restore / decision-response value. Accepts the Rust
+ * JSON-text envelope or an already-structured object; bare names,
+ * garbage, unknown outcomes, and mistyped fields yield null, never throw.
+ */
+export function parseRestoreOutcome(value: unknown): RestoreOutcomeDto | null {
+  let raw: unknown = value;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      raw = JSON.parse(trimmed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row["outcome"] !== "string" || !RESTORE_OUTCOME_SET.has(row["outcome"])) return null;
+  return { outcome: row["outcome"] as RestoreOutcomeName };
+}
+
+/**
+ * Parses one preview-diagnostics value into the redacted DTO. Accepts
+ * the Rust JSON-text bundle or an already-structured object; anything
+ * missing a field or carrying a mistyped field yields null, never throws.
+ * The DTO carries redacted identity only, never raw serials.
+ */
+export function parseDiagnosticPreview(value: unknown): DiagnosticPreviewDto | null {
+  let raw: unknown = value;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      raw = JSON.parse(trimmed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row["deviceModel"] !== "string") return null;
+  if (typeof row["fingerprintRedacted"] !== "string") return null;
+  if (typeof row["allowlistCount"] !== "number" || !Number.isInteger(row["allowlistCount"])) return null;
+  if (typeof row["initialPackageCount"] !== "number" || !Number.isInteger(row["initialPackageCount"])) return null;
+  if (
+    !Array.isArray(row["operations"]) ||
+    !Array.isArray(row["errors"]) ||
+    !Array.isArray(row["warnings"]) ||
+    row["operations"].some((item) => typeof item !== "string") ||
+    row["errors"].some((item) => typeof item !== "string") ||
+    row["warnings"].some((item) => typeof item !== "string")
+  ) {
+    return null;
+  }
+  if (typeof row["redactedEnvelope"] !== "string") return null;
+  return {
+    deviceModel: row["deviceModel"],
+    fingerprintRedacted: row["fingerprintRedacted"],
+    allowlistCount: row["allowlistCount"],
+    initialPackageCount: row["initialPackageCount"],
+    operations: [...(row["operations"] as string[])],
+    errors: [...(row["errors"] as string[])],
+    warnings: [...(row["warnings"] as string[])],
+    redactedEnvelope: row["redactedEnvelope"],
+  };
+}
+
+/**
+ * Redaction problems in a diagnostic preview: the redacted fingerprint
+ * must never equal or contain the live fingerprint, and the redacted
+ * envelope must never contain the live serial or fingerprint. Empty
+ * when the preview is safe to show. Identity values stay arguments only.
+ */
+export function diagnosticRedactionProblems(
+  preview: DiagnosticPreviewDto,
+  serial: string,
+  fingerprint: string,
+): string[] {
+  const problems: string[] = [];
+  if (fingerprint.length > 0) {
+    if (preview.fingerprintRedacted === fingerprint || preview.fingerprintRedacted.includes(fingerprint)) {
+      problems.push("The preview carries the unredacted fingerprint and must not be shown.");
+    }
+    if (preview.redactedEnvelope.includes(fingerprint)) {
+      problems.push("The redacted envelope still carries the fingerprint and must not be shown.");
+    }
+  }
+  if (serial.length > 0 && preview.redactedEnvelope.includes(serial)) {
+    problems.push("The redacted envelope still carries the serial and must not be shown.");
+  }
+  return problems;
+}
+
+/** Stable export-path validation codes mirroring the Rust boundary. */
+export type ExportPathCode = "ok" | "export-path-required" | "rejected-command-payload";
+
+function exportPathCheck(destination: string): { code: ExportPathCode; problem: string | null } {
+  const trimmed = destination.trim();
+  if (trimmed.length === 0) {
+    return {
+      code: "export-path-required",
+      problem: "No export destination was chosen. Choose a file location first.",
+    };
+  }
+  const parts = trimmed.split(/[/\\]/);
+  if (parts.some((part) => part === "..")) {
+    return {
+      code: "rejected-command-payload",
+      problem: "That destination escapes its folder and was rejected. Choose a file location inside one folder.",
+    };
+  }
+  const hasFolder = trimmed.includes("/") || trimmed.includes("\\");
+  const last = parts[parts.length - 1] ?? "";
+  if (!hasFolder || last.length === 0) {
+    return {
+      code: "export-path-required",
+      problem: "That export destination is not usable. Choose an existing folder and a file name.",
+    };
+  }
+  const absolute = /^[A-Za-z]:[/\\]/.test(trimmed) || trimmed.startsWith("\\\\") || trimmed.startsWith("/");
+  if (!absolute) {
+    return {
+      code: "export-path-required",
+      problem: "The export destination must be an absolute file path. Choose a file location first.",
+    };
+  }
+  return { code: "ok", problem: null };
+}
+
+/**
+ * Human message for an unusable export destination (null when the shape
+ * passes). Mirrors the Rust export-path codes: the parent folder must
+ * already exist, which only the backend can verify before writing.
+ */
+export function exportPathProblem(destination: string): string | null {
+  return exportPathCheck(destination).problem;
+}
+
+/** Machine-readable export-path code for the destination shape. */
+export function exportPathCode(destination: string): ExportPathCode {
+  return exportPathCheck(destination).code;
+}
+
+/* ------------------------- Edit flow ------------------------- */
+
+/** Edit lifecycle. Terminal states never restart from the same flow. */
+export type EditStatus =
+  | "idle"
+  | "verifying"
+  | "running"
+  | "complete"
+  | "failed"
+  | "recoverable-disconnect"
+  | "inconsistent-state";
+
+export interface EditSnapshot {
+  status: EditStatus;
+  busy: boolean;
+  announcement: string;
+  appliedCount: number;
+  error: CommandError | null;
+}
+
+export interface EditDeps {
+  discoverDevices: () => Promise<ApplyInvokeResult>;
+  startEdit: (serial: string, fingerprint: string, allowed: string[]) => Promise<ApplyInvokeResult>;
+}
+
+export interface EditInput {
+  serial: string;
+  fingerprint: string;
+  allowed: string[];
+  entries: AppEntryDto[];
+}
+
+function isEditTerminal(status: EditStatus): boolean {
+  return status === "complete" || status === "recoverable-disconnect" || status === "inconsistent-state";
+}
+
+/**
+ * Edit orchestrator: live device re-check, then exactly one backend
+ * call. A plan-rejected failure surfaces its server guidance and never
+ * retries silently. Announces each state change exactly once through
+ * the injected `announce` callback.
+ */
+export class EditFlow {
+  snapshot: EditSnapshot;
+  private input: EditInput;
+  private readonly deps: EditDeps;
+  private readonly announce?: (message: string) => void;
+  private readonly notify?: () => void;
+  private lastAnnounced: string | null = null;
+
+  constructor(
+    input: EditInput,
+    deps: EditDeps,
+    opts?: { announce?: (message: string) => void; onChange?: () => void },
+  ) {
+    this.input = { ...input, allowed: [...input.allowed], entries: [...input.entries] };
+    this.deps = deps;
+    this.announce = opts?.announce;
+    this.notify = opts?.onChange;
+    this.snapshot = { status: "idle", busy: false, announcement: "", appliedCount: 0, error: null };
+  }
+
+  /** Replaces the pending allowlist while the flow has not run. */
+  updateAllowed(allowed: string[]): void {
+    if (this.snapshot.busy || isEditTerminal(this.snapshot.status)) return;
+    if (this.snapshot.status !== "idle" && this.snapshot.status !== "failed") return;
+    this.input = { ...this.input, allowed: [...allowed] };
+    this.notify?.();
+  }
+
+  /** Starts the edit: re-checks the live device first. Terminal flows never restart. */
+  async start(): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (isEditTerminal(this.snapshot.status)) return;
+    this.set({ status: "verifying", busy: true, error: null });
+    this.say("Checking the connected phone before editing the allowed apps.");
+
+    const discovered = await this.deps.discoverDevices();
+    if (!discovered.ok) {
+      if (discovered.error.code === "device-unavailable" || discovered.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: discovered.error });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+      } else {
+        this.set({ status: "failed", busy: false, error: discovered.error });
+        this.say("The phone could not be confirmed. Try again.");
+      }
+      return;
+    }
+    const value: unknown = discovered.value;
+    let foundSerial: string | null = null;
+    if (typeof value === "string") {
+      foundSerial = value;
+    } else if (typeof value === "object" && value !== null) {
+      const serial = (value as Record<string, unknown>)["serial"];
+      if (typeof serial === "string") foundSerial = serial;
+    }
+    if (foundSerial !== this.input.serial) {
+      const error: CommandError = {
+        code: "stale-device",
+        message: "The connected phone is not the one that was inspected.",
+        action: "Reconnect the inspected phone, or start a new inspection.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("This is not the inspected phone. Reconnect the inspected phone, or start a new inspection.");
+      return;
+    }
+
+    this.set({ status: "running", busy: true });
+    this.say("Editing the allowed apps in order.");
+    const started = await this.deps.startEdit(this.input.serial, this.input.fingerprint, [...this.input.allowed]);
+    if (!started.ok) {
+      if (started.error.code === "device-unavailable" || started.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: started.error });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+      } else {
+        this.set({ status: "failed", busy: false, error: started.error });
+        this.say(`${started.error.message} ${started.error.action}`);
+      }
+      return;
+    }
+    this.set({ status: "complete", busy: false, error: null });
+    this.say("The allowed-apps change is complete and verified on the phone. The original baseline is unchanged.");
+  }
+
+  /** Notes one progress payload (JSON text or object). Counts only; only the backend call completes. */
+  noteRemoteProgress(payload: unknown): void {
+    if (isEditTerminal(this.snapshot.status)) return;
+    const name = normalizeProgressPayload(decodeJsonText(payload));
+    if (name === null) return;
+    switch (name) {
+      case "started":
+        if (this.snapshot.status === "idle") this.set({ status: "running", busy: true });
+        else this.set({ busy: true });
+        break;
+      case "operation-applied":
+        this.set({ appliedCount: this.snapshot.appliedCount + 1 });
+        break;
+      case "disconnected":
+        this.set({ status: "recoverable-disconnect", busy: false });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+        break;
+      case "inconsistent-state":
+        this.set({ status: "inconsistent-state", busy: false });
+        this.say("The phone records disagree, so no automatic change is safe.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  private set(partial: Partial<EditSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...partial };
+    this.notify?.();
+  }
+
+  private say(message: string): void {
+    if (message !== this.lastAnnounced) {
+      this.lastAnnounced = message;
+      this.snapshot = { ...this.snapshot, announcement: message };
+      this.announce?.(message);
+      this.notify?.();
+    }
+  }
+}
+
+/* ------------------------- Maintenance flow ------------------------- */
+
+/** Maintenance lifecycle. A verified close ends the flow. */
+export type MaintenanceStatus =
+  | "idle"
+  | "verifying"
+  | "opening"
+  | "open"
+  | "closing"
+  | "closed"
+  | "failed"
+  | "recoverable-disconnect"
+  | "inconsistent-state";
+
+export interface MaintenanceSnapshot {
+  status: MaintenanceStatus;
+  busy: boolean;
+  announcement: string;
+  /** True once the backend verifies the window is open until it verifies the close. */
+  opened: boolean;
+  error: CommandError | null;
+}
+
+export interface MaintenanceDeps {
+  discoverDevices: () => Promise<ApplyInvokeResult>;
+  openMaintenance: (serial: string, fingerprint: string, confirmation: string) => Promise<ApplyInvokeResult>;
+  closeMaintenance: (serial: string, fingerprint: string, approved: string[], scanned: string[]) => Promise<ApplyInvokeResult>;
+}
+
+export interface MaintenanceInput {
+  serial: string;
+  fingerprint: string;
+}
+
+/** Ordinary exit is safe only while no window is recorded open. */
+export function canExitMaintenance(
+  snapshot: Pick<MaintenanceSnapshot, "status" | "opened" | "busy">,
+): boolean {
+  if (snapshot.opened) return false;
+  return snapshot.status !== "opening" && snapshot.status !== "closing";
+}
+
+/** Plain-text reason ordinary exit stays guarded (null when exit is safe). */
+export function maintenanceExitBlockReason(
+  snapshot: Pick<MaintenanceSnapshot, "status" | "opened" | "busy">,
+): string | null {
+  if (canExitMaintenance(snapshot)) return null;
+  return "Store maintenance is still open, so new installs are possible. Close maintenance first; the verified close re-applies the store restrictions.";
+}
+
+function isMaintenanceTerminal(status: MaintenanceStatus): boolean {
+  return status === "closed" || status === "recoverable-disconnect" || status === "inconsistent-state";
+}
+
+/**
+ * Maintenance orchestrator: the typed warning gates `open`, and only a
+ * verified `close` releases the exit guard. A failed close keeps the
+ * window recorded open and announces its guidance; it never exits
+ * silently. Announces each state change exactly once.
+ */
+export class MaintenanceFlow {
+  snapshot: MaintenanceSnapshot;
+  private readonly input: MaintenanceInput;
+  private readonly deps: MaintenanceDeps;
+  private readonly announce?: (message: string) => void;
+  private readonly notify?: () => void;
+  private lastAnnounced: string | null = null;
+
+  constructor(
+    input: MaintenanceInput,
+    deps: MaintenanceDeps,
+    opts?: { announce?: (message: string) => void; onChange?: () => void },
+  ) {
+    this.input = { ...input };
+    this.deps = deps;
+    this.announce = opts?.announce;
+    this.notify = opts?.onChange;
+    this.snapshot = { status: "idle", busy: false, announcement: "", opened: false, error: null };
+  }
+
+  /** Opens the window. A mismatched phrase blocks with a reason and never calls the backend. */
+  async open(confirmation: string): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (this.snapshot.status === "open" || this.snapshot.status === "opening" || this.snapshot.status === "closing") {
+      return;
+    }
+    if (isMaintenanceTerminal(this.snapshot.status)) return;
+    const reason = maintenanceConfirmReason(confirmation);
+    if (reason !== null) {
+      const error: CommandError = {
+        code: "invalid-confirmation",
+        message: "The maintenance phrase was not typed exactly.",
+        action: `Type ${MAINTENANCE_CONFIRMATION} exactly to open store maintenance.`,
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say(`${error.message} ${error.action}`);
+      return;
+    }
+    this.set({ status: "verifying", busy: true, error: null });
+    this.say("Checking the connected phone before opening store maintenance.");
+
+    const discovered = await this.deps.discoverDevices();
+    if (!discovered.ok) {
+      this.failDiscover(discovered.error);
+      return;
+    }
+    if (!this.serialMatches(discovered.value)) {
+      const error: CommandError = {
+        code: "stale-device",
+        message: "The connected phone is not the one that was inspected.",
+        action: "Reconnect the inspected phone, or start a new inspection.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("This is not the inspected phone. Reconnect the inspected phone, or start a new inspection.");
+      return;
+    }
+
+    this.set({ status: "opening", busy: true });
+    this.say("Opening store maintenance.");
+    const opened = await this.deps.openMaintenance(this.input.serial, this.input.fingerprint, confirmation);
+    if (!opened.ok) {
+      if (opened.error.code === "device-unavailable" || opened.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: opened.error });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+      } else {
+        this.set({ status: "failed", busy: false, error: opened.error });
+        this.say(`${opened.error.message} ${opened.error.action}`);
+      }
+      return;
+    }
+    this.set({ status: "open", busy: false, opened: true, error: null });
+    this.say("Store maintenance is open. New installs are possible until the verified close re-applies the store restrictions.");
+  }
+
+  /**
+   * Verified close: re-applies the store restrictions before releasing
+   * the exit guard. A failure keeps the window recorded open with its
+   * guidance; it never pretends the close happened.
+   */
+  async close(approved: string[], scanned: string[]): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (!this.snapshot.opened) return;
+    if (this.snapshot.status === "closing" || this.snapshot.status === "closed") return;
+    this.set({ status: "closing", busy: true, error: null });
+    this.say("Closing store maintenance and re-applying the store restrictions.");
+    const closed = await this.deps.closeMaintenance(
+      this.input.serial,
+      this.input.fingerprint,
+      [...approved],
+      [...scanned],
+    );
+    if (!closed.ok) {
+      if (closed.error.code === "device-unavailable" || closed.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: closed.error });
+        this.say("The phone stopped responding. Check the USB cable, then close maintenance again.");
+        return;
+      }
+      // The window stays recorded open: ordinary exit remains guarded.
+      this.set({ status: "failed", busy: false, error: closed.error });
+      this.say(`${closed.error.message} ${closed.error.action}`);
+      return;
+    }
+    this.set({ status: "closed", busy: false, opened: false, error: null });
+    this.say("Store maintenance is closed and the store restrictions are verified on the phone.");
+  }
+
+  /** Notes one progress payload (JSON text or object). Only a verified close releases the guard. */
+  noteRemoteProgress(payload: unknown): void {
+    if (isMaintenanceTerminal(this.snapshot.status)) return;
+    const name = normalizeProgressPayload(decodeJsonText(payload));
+    if (name === null) return;
+    switch (name) {
+      case "maintenance-opened":
+        this.set({ status: "open", busy: false, opened: true });
+        this.say("Store maintenance is open. New installs are possible until the verified close re-applies the store restrictions.");
+        break;
+      case "maintenance-closed":
+        this.set({ status: "closed", busy: false, opened: false });
+        this.say("Store maintenance is closed and the store restrictions are verified on the phone.");
+        break;
+      case "disconnected":
+        this.set({ status: "recoverable-disconnect", busy: false });
+        this.say("The phone stopped responding. Check the USB cable, then close maintenance again.");
+        break;
+      case "inconsistent-state":
+        this.set({ status: "inconsistent-state", busy: false });
+        this.say("The phone records disagree, so no automatic change is safe.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  private serialMatches(value: unknown): boolean {
+    if (typeof value === "string") return value === this.input.serial;
+    if (typeof value === "object" && value !== null) {
+      const serial = (value as Record<string, unknown>)["serial"];
+      if (typeof serial === "string") return serial === this.input.serial;
+    }
+    return false;
+  }
+
+  private failDiscover(error: CommandError): void {
+    if (error.code === "device-unavailable" || error.code === "no-device") {
+      this.set({ status: "recoverable-disconnect", busy: false, error });
+      this.say("The phone stopped responding. Check the USB cable, then try again.");
+    } else {
+      this.set({ status: "failed", busy: false, error });
+      this.say("The phone could not be confirmed. Try again.");
+    }
+  }
+
+  private set(partial: Partial<MaintenanceSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...partial };
+    this.notify?.();
+  }
+
+  private say(message: string): void {
+    if (message !== this.lastAnnounced) {
+      this.lastAnnounced = message;
+      this.snapshot = { ...this.snapshot, announcement: message };
+      this.announce?.(message);
+      this.notify?.();
+    }
+  }
+}
+
+/* ------------------------- Restore flow ------------------------- */
+
+/** Restore lifecycle. Terminal states never restart from the same flow. */
+export type RestoreStatus =
+  | "idle"
+  | "verifying"
+  | "running"
+  | "chooser-required"
+  | "cleanup-retry"
+  | "complete"
+  | "blocked"
+  | "recoverable-disconnect"
+  | "inconsistent-state"
+  | "failed";
+
+export interface RestoreSnapshot {
+  status: RestoreStatus;
+  busy: boolean;
+  announcement: string;
+  outcome: RestoreOutcomeName | null;
+  restoredCount: number;
+  error: CommandError | null;
+}
+
+/** Answers the restore launcher wait (mirrors the apply chooser answers). */
+export type RestoreDecisionName = "home-confirmed" | "home-cancelled";
+
+export interface RestoreDeps {
+  discoverDevices: () => Promise<ApplyInvokeResult>;
+  startRestore: (serial: string, fingerprint: string, confirmation: string) => Promise<ApplyInvokeResult>;
+  respondToDecision: (serial: string, fingerprint: string, decision: RestoreDecisionName) => Promise<ApplyInvokeResult>;
+  retryCleanup: (serial: string, fingerprint: string) => Promise<ApplyInvokeResult>;
+}
+
+export interface RestoreInput {
+  serial: string;
+  fingerprint: string;
+}
+
+function isRestoreTerminal(status: RestoreStatus): boolean {
+  return (
+    status === "complete" ||
+    status === "blocked" ||
+    status === "recoverable-disconnect" ||
+    status === "inconsistent-state"
+  );
+}
+
+/** True only for the backend-verified complete outcome, never progress alone. */
+export function isRestoreComplete(snapshot: Pick<RestoreSnapshot, "status" | "outcome">): boolean {
+  return snapshot.status === "complete" && snapshot.outcome === "complete";
+}
+
+/**
+ * Restore orchestrator: the exact typed phrase gates `start`, inverse
+ * progress counts verified steps, the launcher wait answers through the
+ * backend, and cleanup-retry retention offers `retry` until the backend
+ * reports the verified complete outcome. Announces each state change
+ * exactly once.
+ */
+export class RestoreFlow {
+  snapshot: RestoreSnapshot;
+  private readonly input: RestoreInput;
+  private readonly deps: RestoreDeps;
+  private readonly announce?: (message: string) => void;
+  private readonly notify?: () => void;
+  private lastAnnounced: string | null = null;
+
+  constructor(
+    input: RestoreInput,
+    deps: RestoreDeps,
+    opts?: { announce?: (message: string) => void; onChange?: () => void },
+  ) {
+    this.input = { ...input };
+    this.deps = deps;
+    this.announce = opts?.announce;
+    this.notify = opts?.onChange;
+    this.snapshot = {
+      status: "idle",
+      busy: false,
+      announcement: "",
+      outcome: null,
+      restoredCount: 0,
+      error: null,
+    };
+  }
+
+  /** Starts the restore. A mismatched phrase blocks with a reason and never calls the backend. */
+  async start(confirmation: string): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (isRestoreTerminal(this.snapshot.status)) return;
+    if (this.snapshot.status !== "idle" && this.snapshot.status !== "failed") return;
+    if (restoreConfirmReason(confirmation) !== null) {
+      const error: CommandError = {
+        code: "invalid-confirmation",
+        message: "The restore phrase was not typed exactly.",
+        action: `Type ${RESTORE_CONFIRMATION} exactly to begin restoring.`,
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say(`${error.message} ${error.action}`);
+      return;
+    }
+    this.set({ status: "verifying", busy: true, error: null });
+    this.say("Checking the connected phone before restoring.");
+
+    const discovered = await this.deps.discoverDevices();
+    if (!discovered.ok) {
+      this.failDiscover(discovered.error);
+      return;
+    }
+    if (!this.serialMatches(discovered.value)) {
+      const error: CommandError = {
+        code: "stale-device",
+        message: "The connected phone is not the one that was inspected.",
+        action: "Reconnect the inspected phone, or start a new inspection.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("This is not the inspected phone. Reconnect the inspected phone, or start a new inspection.");
+      return;
+    }
+
+    this.set({ status: "running", busy: true });
+    this.say("Restoring the recorded changes in reverse order.");
+    const started = await this.deps.startRestore(this.input.serial, this.input.fingerprint, confirmation);
+    if (!started.ok) {
+      if (started.error.code === "device-unavailable" || started.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: started.error });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+      } else {
+        this.set({ status: "failed", busy: false, error: started.error });
+        this.say(`${started.error.message} ${started.error.action}`);
+      }
+      return;
+    }
+    const dto = parseRestoreOutcome(started.value);
+    if (dto === null) {
+      const error: CommandError = {
+        code: "preflight-failed",
+        message: "The phone returned an answer the desktop does not understand.",
+        action: "Reconnect the phone and try again.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("The phone returned an answer the desktop does not understand. Reconnect and try again.");
+      return;
+    }
+    this.applyOutcome(dto);
+  }
+
+  /** Answers the launcher wait (valid only while choosing). */
+  async answerChooser(decision: RestoreDecisionName): Promise<void> {
+    if (this.snapshot.status !== "chooser-required") return;
+    if (this.snapshot.busy) return;
+    this.set({ busy: true });
+    this.say("Sending your answer to the phone.");
+    const result = await this.deps.respondToDecision(this.input.serial, this.input.fingerprint, decision);
+    if (!result.ok) {
+      this.set({ busy: false, status: "failed", error: result.error });
+      this.say("Your answer could not be sent. Try again.");
+      return;
+    }
+    const dto = parseRestoreOutcome(result.value);
+    if (dto === null) {
+      const error: CommandError = {
+        code: "preflight-failed",
+        message: "The phone returned an answer the desktop does not understand.",
+        action: "Reconnect the phone and try again.",
+      };
+      this.set({ busy: false, status: "failed", error });
+      this.say("The phone returned an answer the desktop does not understand. Reconnect and try again.");
+      return;
+    }
+    this.applyOutcome(dto);
+  }
+
+  /**
+   * Retries final cleanup without repeating restored mutations (valid
+   * only while cleanup-retry is retained). The backend verifies the
+   * removal before this flow reports complete.
+   */
+  async retry(): Promise<void> {
+    if (this.snapshot.status !== "cleanup-retry") return;
+    if (this.snapshot.busy) return;
+    this.set({ busy: true });
+    this.say("Retrying final cleanup.");
+    const result = await this.deps.retryCleanup(this.input.serial, this.input.fingerprint);
+    if (!result.ok) {
+      this.set({ busy: false, status: "failed", error: result.error });
+      this.say(`${result.error.message} ${result.error.action}`);
+      return;
+    }
+    this.set({ status: "complete", busy: false, outcome: "complete", error: null });
+    this.say("Restore is complete and verified on the phone. The recovery data is removed.");
+  }
+
+  /**
+   * Notes one progress payload (JSON text or object). Progress counts
+   * verified steps, but only a backend outcome completes the flow; a
+   * disconnect invalidates further answers.
+   */
+  noteRemoteProgress(payload: unknown): void {
+    if (isRestoreTerminal(this.snapshot.status)) return;
+    const name = normalizeProgressPayload(decodeJsonText(payload));
+    if (name === null) return;
+    switch (name) {
+      case "started":
+      case "restore-started":
+        if (this.snapshot.status === "idle") this.set({ status: "running", busy: true });
+        else this.set({ busy: true });
+        break;
+      case "operation-applied":
+        this.set({ restoredCount: this.snapshot.restoredCount + 1 });
+        break;
+      case "restore-completed":
+        // Progress alone never completes: only the backend outcome does.
+        break;
+      case "chooser-required":
+        this.set({ status: "chooser-required", busy: false });
+        this.say("The phone needs the previous default launcher chosen by hand. Follow the chooser steps on the phone.");
+        break;
+      case "completed":
+        // Progress alone never completes: only the backend outcome does.
+        break;
+      case "disconnected":
+        this.set({ status: "recoverable-disconnect", busy: false });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+        break;
+      case "inconsistent-state":
+        this.set({ status: "inconsistent-state", busy: false });
+        this.say("The phone records disagree, so no automatic change is safe.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  private applyOutcome(dto: RestoreOutcomeDto): void {
+    const base = { outcome: dto.outcome, busy: false as const, error: null as CommandError | null };
+    switch (dto.outcome) {
+      case "complete":
+        this.set({ ...base, status: "complete" });
+        this.say("Restore is complete and verified on the phone. The recovery data is removed.");
+        break;
+      case "chooser-required":
+        this.set({ ...base, status: "chooser-required" });
+        this.say("The phone needs the previous default launcher chosen by hand. Follow the chooser steps on the phone.");
+        break;
+      case "cleanup-retry":
+        this.set({ ...base, status: "cleanup-retry" });
+        this.say("Everything is restored except final cleanup. Retry cleanup to remove the remaining recovery data.");
+        break;
+      case "blocked":
+        this.set({ ...base, status: "blocked" });
+        this.say("Restore cannot proceed safely right now. Reconnect, reconcile the session, then retry restore.");
+        break;
+      case "recoverable-disconnect":
+        this.set({ ...base, status: "recoverable-disconnect" });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+        break;
+    }
+  }
+
+  private serialMatches(value: unknown): boolean {
+    if (typeof value === "string") return value === this.input.serial;
+    if (typeof value === "object" && value !== null) {
+      const serial = (value as Record<string, unknown>)["serial"];
+      if (typeof serial === "string") return serial === this.input.serial;
+    }
+    return false;
+  }
+
+  private failDiscover(error: CommandError): void {
+    if (error.code === "device-unavailable" || error.code === "no-device") {
+      this.set({ status: "recoverable-disconnect", busy: false, error });
+      this.say("The phone stopped responding. Check the USB cable, then try again.");
+    } else {
+      this.set({ status: "failed", busy: false, error });
+      this.say("The phone could not be confirmed. Try again.");
+    }
+  }
+
+  private set(partial: Partial<RestoreSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...partial };
+    this.notify?.();
+  }
+
+  private say(message: string): void {
+    if (message !== this.lastAnnounced) {
+      this.lastAnnounced = message;
+      this.snapshot = { ...this.snapshot, announcement: message };
+      this.announce?.(message);
+      this.notify?.();
+    }
+  }
+}
+
+/* ------------------------- Diagnostics flow ------------------------- */
+
+/** Diagnostics lifecycle. The export writes locally only, never uploads. */
+export type DiagnosticsStatus =
+  | "idle"
+  | "loading-preview"
+  | "preview-ready"
+  | "exporting"
+  | "exported"
+  | "failed";
+
+export interface DiagnosticsSnapshot {
+  status: DiagnosticsStatus;
+  busy: boolean;
+  announcement: string;
+  preview: DiagnosticPreviewDto | null;
+  error: CommandError | null;
+}
+
+export interface DiagnosticsDeps {
+  previewDiagnostics: (serial: string, fingerprint: string) => Promise<ApplyInvokeResult>;
+  exportDiagnostics: (serial: string, fingerprint: string, destination: string) => Promise<ApplyInvokeResult>;
+}
+
+export interface DiagnosticsInput {
+  serial: string;
+  fingerprint: string;
+}
+
+/**
+ * Diagnostics orchestrator: preview the redacted DTO first, then write
+ * it to an explicit absolute-path destination on this computer. A bad
+ * destination blocks with its reason and never calls the backend.
+ * Announces each state change exactly once.
+ */
+export class DiagnosticsFlow {
+  snapshot: DiagnosticsSnapshot;
+  private readonly input: DiagnosticsInput;
+  private readonly deps: DiagnosticsDeps;
+  private readonly announce?: (message: string) => void;
+  private readonly notify?: () => void;
+  private lastAnnounced: string | null = null;
+
+  constructor(
+    input: DiagnosticsInput,
+    deps: DiagnosticsDeps,
+    opts?: { announce?: (message: string) => void; onChange?: () => void },
+  ) {
+    this.input = { ...input };
+    this.deps = deps;
+    this.announce = opts?.announce;
+    this.notify = opts?.onChange;
+    this.snapshot = { status: "idle", busy: false, announcement: "", preview: null, error: null };
+  }
+
+  /** Loads the redacted preview. Nothing is written by a preview. */
+  async preview(): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (this.snapshot.status === "exported") return;
+    this.set({ status: "loading-preview", busy: true, error: null });
+    this.say("Loading the redacted diagnostic preview.");
+    const loaded = await this.deps.previewDiagnostics(this.input.serial, this.input.fingerprint);
+    if (!loaded.ok) {
+      this.set({ status: "failed", busy: false, error: loaded.error });
+      this.say(`${loaded.error.message} ${loaded.error.action}`);
+      return;
+    }
+    const dto = parseDiagnosticPreview(loaded.value);
+    if (dto === null) {
+      const error: CommandError = {
+        code: "preflight-failed",
+        message: "The phone returned an answer the desktop does not understand.",
+        action: "Reconnect the phone and try again.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("The phone returned an answer the desktop does not understand. Reconnect and try again.");
+      return;
+    }
+    this.set({ status: "preview-ready", busy: false, preview: dto, error: null });
+    this.say("The diagnostic preview is ready. Review it before choosing an export destination.");
+  }
+
+  /**
+   * Writes the redacted preview to an explicit destination on this
+   * computer. Preview-first is verified before the shape check: without
+   * a loaded preview the export fails closed and never calls the
+   * backend. A bad destination blocks with its reason likewise.
+   */
+  async export(destination: string): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (this.snapshot.preview === null) {
+      const error: CommandError = {
+        code: "export-path-required",
+        message: "Load the redacted preview before choosing an export destination.",
+        action: "Load the preview, review it, then choose a file location.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say(`${error.message} ${error.action}`);
+      return;
+    }
+    const checked = exportPathCheck(destination);
+    if (checked.problem !== null) {
+      const error: CommandError = {
+        code: checked.code === "rejected-command-payload" ? "rejected-command-payload" : "export-path-required",
+        message: checked.problem,
+        action: "Choose an existing folder and a file name.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say(`${error.message} ${error.action}`);
+      return;
+    }
+    this.set({ status: "exporting", busy: true, error: null });
+    this.say("Writing the diagnostic export on this computer.");
+    const written = await this.deps.exportDiagnostics(this.input.serial, this.input.fingerprint, destination.trim());
+    if (!written.ok) {
+      this.set({ status: "failed", busy: false, error: written.error });
+      this.say(`${written.error.message} ${written.error.action}`);
+      return;
+    }
+    this.set({ status: "exported", busy: false, error: null });
+    this.say("The diagnostic export is saved on this computer. Nothing was uploaded.");
+  }
+
+  /** Notes one progress payload (JSON text or object). Exports complete only through the backend call. */
+  noteRemoteProgress(payload: unknown): void {
+    if (this.snapshot.status === "exported") return;
+    const name = normalizeProgressPayload(decodeJsonText(payload));
+    if (name === null) return;
+    if (name === "disconnected" && this.snapshot.status === "exporting") {
+      this.set({ status: "failed", busy: false });
+      this.say("The phone stopped responding. Check the USB cable, then try again.");
+    }
+  }
+
+  private set(partial: Partial<DiagnosticsSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...partial };
+    this.notify?.();
+  }
+
+  private say(message: string): void {
+    if (message !== this.lastAnnounced) {
+      this.lastAnnounced = message;
+      this.snapshot = { ...this.snapshot, announcement: message };
+      this.announce?.(message);
+      this.notify?.();
+    }
+  }
+}
+
+/**
+ * Stable identity for the policy flows held by the host. The host keeps
+ * one maintenance/restore/diagnostics/edit flow per key and only builds
+ * new flows when the key changes, so backing out of a retained state
+ * (an open window, a cleanup-retry) and re-entering the view keeps the
+ * live flow instead of discarding it. A new inspection or a changed
+ * session kind resets the key and the flows with it.
+ */
+export function policyFlowKeyFor(
+  serial: string | null,
+  fingerprint: string | null,
+  session: SessionDto | null,
+): string {
+  return `${serial ?? ""}\n${fingerprint ?? ""}\n${session?.kind ?? ""}`;
+}
+
