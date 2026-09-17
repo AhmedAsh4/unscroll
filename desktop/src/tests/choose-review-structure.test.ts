@@ -193,11 +193,15 @@ describe("correction round: token heuristic, honest stub, shared pills, remount 
     assert.ok(read("src/lib/components/AppList.svelte").includes("pillForEntry"), "shared pill helper used");
   });
 
-  it("the enabled-Apply stub stays honest with no dead-end phrasing (F2)", () => {
+  it("Apply navigates through the gate into the real Task 18 flow (F2 stub replaced)", () => {
     const source = read("src/App.svelte");
     assert.doesNotMatch(source, /not available in this build yet/, "dead-end phrasing gone");
-    assert.match(source, /next build/i, "stub names the next build");
-    assert.match(source, /selection is preserved/i, "stub confirms the selection survives");
+    assert.doesNotMatch(source, /guided apply step lands in the next build/i, "Task 18 replaced the interim stub");
+    assert.ok(source.includes("ApplyScreen"), "App renders the apply view");
+    assert.ok(source.includes("CompletionScreen"), "App renders the completion view");
+    assert.ok(source.includes("canApply"), "navigation honors the Review gate");
+    assert.ok(source.includes("ApplyFlow"), "the stub gave way to the real apply flow");
+    assert.ok(source.includes("allowlistFor"), "allowlist derives from kept packageIds");
   });
 
   it("Back from Choose restores the inspection instead of re-inspecting (F5)", () => {

@@ -1035,3 +1035,504 @@ export interface InspectedInfo {
   session: SessionDto | null;
   connection: ConnectionState;
 }
+
+/* ------------------------------------------------------------------ */
+/* Task 18: guided apply state machine (presentation only).             */
+/*                                                                     */
+/* Pure mapping over the Task 15 boundary: the backend owns every      */
+/* mutation and reports terminal outcomes as JSON text                 */
+/* `{outcome,package,partialProtection}` from the apply-start and      */
+/* decision-response calls. This machine never constructs device       */
+/* commands or plans; it re-checks the live device before any call,    */
+/* tracks ordered progress, and completes only on the backend          */
+/* `complete` outcome. Identity values stay in memory for invoke       */
+/* arguments only. Progress payloads arrive as JSON text and are       */
+/* decoded here the same way `decodeProgressPayload` does, then        */
+/* narrowed with `normalizeProgressPayload`.                           */
+/* ------------------------------------------------------------------ */
+
+/** Terminal apply outcomes reported by the backend envelope. */
+export const APPLY_OUTCOMES = [
+  "complete",
+  "decision-required",
+  "chooser-required",
+  "rolled-back",
+  "recoverable-disconnect",
+  "inconsistent-state",
+] as const;
+
+export type ApplyOutcomeName = (typeof APPLY_OUTCOMES)[number];
+
+const APPLY_OUTCOME_SET: ReadonlySet<string> = new Set(APPLY_OUTCOMES);
+
+/** Domain answers the apply UI may send (never invented elsewhere). */
+export type ApplyDecisionName = "continue" | "rollback" | "home-confirmed" | "home-cancelled";
+
+/** Parsed backend outcome envelope: outcome, blocking package, partial gaps. */
+export interface ApplyOutcomeDto {
+  outcome: ApplyOutcomeName;
+  package: string | null;
+  partialProtection: string[];
+}
+
+/**
+ * Parses one apply-start / decision-response value. Accepts the Rust
+ * JSON-text envelope or an already-structured object; anything else (bare
+ * names, garbage, unknown outcomes, mistyped fields) yields null, never
+ * throws.
+ */
+export function parseApplyOutcome(value: unknown): ApplyOutcomeDto | null {
+  let raw: unknown = value;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      raw = JSON.parse(trimmed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row["outcome"] !== "string" || !APPLY_OUTCOME_SET.has(row["outcome"])) return null;
+  const pkg = row["package"];
+  if (pkg !== null && (typeof pkg !== "string" || pkg.length === 0)) return null;
+  const partial = row["partialProtection"];
+  if (!Array.isArray(partial) || partial.some((item) => typeof item !== "string")) return null;
+  return {
+    outcome: row["outcome"] as ApplyOutcomeName,
+    package: (pkg as string | null) ?? null,
+    partialProtection: [...(partial as string[])],
+  };
+}
+
+/** Allowlist for the apply call: kept packageIds (selection true), sorted. */
+export function allowlistFor(entries: AppEntryDto[], selection: SelectionMap): string[] {
+  const kept: string[] = [];
+  for (const item of entries) {
+    if (selection[item.packageId] === true) kept.push(item.packageId);
+  }
+  return kept.sort();
+}
+
+/** Resolves a blocking packageId to its label for the decision screen. */
+export function blockingAppFor(
+  entries: AppEntryDto[],
+  packageId: string | null,
+): { packageId: string; label: string } | null {
+  if (packageId === null || packageId.length === 0) return null;
+  const found = entries.find((item) => item.packageId === packageId);
+  return found ? { packageId: found.packageId, label: found.label } : null;
+}
+
+/** Decodes one JSON-text progress payload without throwing (never a throw). */
+function decodeJsonText(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return raw;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Extracts the progress detail (the blocking packageId for
+ * `decision-required`) from a raw payload. Tolerates JSON text, objects,
+ * and one transport wrapping level; anything else yields null.
+ */
+export function extractProgressDetail(payload: unknown): string | null {
+  const raw = decodeJsonText(payload);
+  if (typeof raw === "object" && raw !== null) {
+    const row = raw as Record<string, unknown>;
+    if (typeof row["detail"] === "string" && row["detail"].length > 0) return row["detail"];
+    if ("payload" in row && row["payload"] !== raw) return extractProgressDetail(row["payload"]);
+  }
+  return null;
+}
+
+/** Apply lifecycle. Terminal states never restart from the same flow. */
+export type ApplyStatus =
+  | "idle"
+  | "verifying"
+  | "running"
+  | "decision-required"
+  | "chooser-required"
+  | "rolling-back"
+  | "complete"
+  | "rolled-back"
+  | "recoverable-disconnect"
+  | "inconsistent-state"
+  | "failed";
+
+export interface ApplySnapshot {
+  status: ApplyStatus;
+  busy: boolean;
+  announcement: string;
+  appliedCount: number;
+  rollbackCount: number;
+  blockingPackage: string | null;
+  partialProtection: string[];
+  error: CommandError | null;
+  outcome: ApplyOutcomeName | null;
+  /**
+   * Origin of a `rolled-back` terminal state. `direct` means the backend
+   * reported `rolled-back` without a preceding user rollback answer in this
+   * flow (the store hard-failure path, the only case with a known store
+   * cause). `user-rollback` / `chooser-cancel` mean the rollback followed
+   * an explicit user answer. Null unless the status is `rolled-back`.
+   */
+  rolledBackFrom: "user-rollback" | "chooser-cancel" | "direct" | null;
+}
+
+/**
+ * Injected transport. Values stay `unknown` because the Rust boundary
+ * returns the outcome envelope as JSON text while older typings describe
+ * narrower shapes; `parseApplyOutcome` narrows before anything is trusted.
+ */
+export type ApplyInvokeResult = { ok: true; value: unknown } | { ok: false; error: CommandError };
+
+export interface ApplyDeps {
+  discoverDevices: () => Promise<ApplyInvokeResult>;
+  startApply: (serial: string, fingerprint: string, allowed: string[]) => Promise<ApplyInvokeResult>;
+  respondToDecision: (serial: string, fingerprint: string, decision: ApplyDecisionName) => Promise<ApplyInvokeResult>;
+}
+
+export interface ApplyInput {
+  serial: string;
+  fingerprint: string;
+  allowed: string[];
+  entries: AppEntryDto[];
+}
+
+/** True only for the backend-verified complete outcome, never progress alone. */
+export function isApplyComplete(snapshot: Pick<ApplySnapshot, "status" | "outcome">): boolean {
+  return snapshot.status === "complete" && snapshot.outcome === "complete";
+}
+
+/**
+ * @deprecated Do not use for copy branching. The backend does NOT guarantee
+ * a direct `rolled-back` is a store failure — transaction/runner.rs yields
+ * direct RolledBack for LauncherPolicy failure, Verify failure, and
+ * prior-session resume too, and the envelope carries no cause. Kept only as
+ * an origin signal awaiting a future backend `reason` field.
+ */
+export function isStoreRollback(
+  snapshot: Pick<ApplySnapshot, "status" | "rolledBackFrom">,
+): boolean {
+  return snapshot.status === "rolled-back" && snapshot.rolledBackFrom === "direct";
+}
+
+/** Generic rolled-back recovery (cause unknown / ordinary user rollback). */
+export const ROLLED_BACK_GENERIC_RECOVERY =
+  "All completed changes were rolled back and verified; the phone is unchanged. Review the selection and try again.";
+
+/** Store hard-failure recovery (direct backend rolled-back only). */
+export const ROLLED_BACK_STORE_RECOVERY =
+  "All completed changes were rolled back and verified; the phone is unchanged. Setup cannot continue with incomplete store protection: every detected store must be restricted for setup to finish. Review the selection and try again.";
+
+/** Generic rolled-back lede (cause unknown / ordinary user rollback). */
+export const ROLLED_BACK_GENERIC_LEDE =
+  "All completed changes were rolled back and verified; the phone is unchanged. Review the selection and try again.";
+
+/** Store hard-failure lede (direct backend rolled-back only). */
+export const ROLLED_BACK_STORE_LEDE =
+  "All completed changes were rolled back and verified, so the phone is unchanged. Setup cannot continue with incomplete store protection: every detected store must be restricted for setup to finish.";
+
+/**
+ * Rolled-back recovery copy: always the generic sentence. The backend
+ * envelope carries no rollback cause (direct `rolled-back` also occurs for
+ * LauncherPolicy failure, Verify failure, and prior-session resume), so no
+ * branch may attribute it to stores. Null unless the status is `rolled-back`.
+ */
+export function rolledBackRecoveryText(
+  snapshot: Pick<ApplySnapshot, "status" | "rolledBackFrom">,
+): string | null {
+  if (snapshot.status !== "rolled-back") return null;
+  return ROLLED_BACK_GENERIC_RECOVERY;
+}
+
+/**
+ * Rolled-back lede copy: always the generic sentence for the same
+ * no-cause reason as `rolledBackRecoveryText`. Null unless `rolled-back`.
+ */
+export function rolledBackLedeText(
+  snapshot: Pick<ApplySnapshot, "status" | "rolledBackFrom">,
+): string | null {
+  if (snapshot.status !== "rolled-back") return null;
+  return ROLLED_BACK_GENERIC_LEDE;
+}
+
+function isApplyTerminal(status: ApplyStatus): boolean {
+  return (
+    status === "complete" ||
+    status === "rolled-back" ||
+    status === "recoverable-disconnect" ||
+    status === "inconsistent-state"
+  );
+}
+
+/**
+ * Apply orchestrator: live device re-check, then exactly one backend call
+ * per user answer. Announces each state change exactly once through the
+ * injected `announce` callback (the shell renders it in its single polite
+ * region). Concurrent `start()` calls collapse into the running one, and a
+ * replaced device fails closed before any mutation.
+ */
+export class ApplyFlow {
+  snapshot: ApplySnapshot;
+  private readonly input: ApplyInput;
+  private readonly deps: ApplyDeps;
+  private readonly announce?: (message: string) => void;
+  private readonly notify?: () => void;
+  private lastAnnounced: string | null = null;
+
+  constructor(
+    input: ApplyInput,
+    deps: ApplyDeps,
+    opts?: { announce?: (message: string) => void; onChange?: () => void },
+  ) {
+    this.input = { ...input, allowed: [...input.allowed], entries: [...input.entries] };
+    this.deps = deps;
+    this.announce = opts?.announce;
+    this.notify = opts?.onChange;
+    this.snapshot = {
+      status: "idle",
+      busy: false,
+      announcement: "",
+      appliedCount: 0,
+      rollbackCount: 0,
+      blockingPackage: null,
+      partialProtection: [],
+      error: null,
+      outcome: null,
+      rolledBackFrom: null,
+    };
+  }
+
+  /**
+   * Starts the apply: re-checks the live device first and never mutates a
+   * replaced or unreachable phone. Terminal flows never restart.
+   */
+  async start(): Promise<void> {
+    if (this.snapshot.busy) return;
+    if (isApplyTerminal(this.snapshot.status)) return;
+    this.set({ status: "verifying", busy: true, error: null });
+    this.say("Checking the connected phone before applying the chosen policy.");
+
+    const discovered = await this.deps.discoverDevices();
+    if (!discovered.ok) {
+      // Fail closed: a dropped cable reports the recovery state, while any
+      // other discovery failure keeps its command error for retry.
+      if (discovered.error.code === "device-unavailable" || discovered.error.code === "no-device") {
+        this.set({ status: "recoverable-disconnect", busy: false, error: discovered.error });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+      } else {
+        this.set({ status: "failed", busy: false, error: discovered.error });
+        this.say("The phone could not be confirmed. Try again.");
+      }
+      return;
+    }
+    const value: unknown = discovered.value;
+    let foundSerial: string | null = null;
+    if (typeof value === "string") {
+      foundSerial = value;
+    } else if (typeof value === "object" && value !== null) {
+      const serial = (value as Record<string, unknown>)["serial"];
+      if (typeof serial === "string") foundSerial = serial;
+    }
+    if (foundSerial !== this.input.serial) {
+      const error: CommandError = {
+        code: "stale-device",
+        message: "The connected phone is not the one that was inspected.",
+        action: "Reconnect the inspected phone, or start a new inspection.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("This is not the inspected phone. Reconnect the inspected phone, or start a new inspection.");
+      return;
+    }
+
+    this.set({ status: "running", busy: true });
+    this.say("Applying the chosen policy in order.");
+    const started = await this.deps.startApply(this.input.serial, this.input.fingerprint, [...this.input.allowed]);
+    if (!started.ok) {
+      this.set({ status: "failed", busy: false, error: started.error });
+      this.say("Applying could not start. Try again.");
+      return;
+    }
+    const dto = parseApplyOutcome(started.value);
+    if (dto === null) {
+      const error: CommandError = {
+        code: "preflight-failed",
+        message: "The phone returned an answer the desktop does not understand.",
+        action: "Reconnect the phone and try again.",
+      };
+      this.set({ status: "failed", busy: false, error });
+      this.say("The phone returned an answer the desktop does not understand. Reconnect and try again.");
+      return;
+    }
+    this.applyOutcome(dto);
+  }
+
+  /** Answers an ordinary-app decision (valid only while deciding). */
+  async answerDecision(decision: "continue" | "rollback"): Promise<void> {
+    if (this.snapshot.status !== "decision-required") return;
+    if (this.snapshot.busy) return;
+    await this.answer(decision);
+  }
+
+  /** Answers the launcher-chooser wait (valid only while choosing). */
+  async answerChooser(decision: "home-confirmed" | "home-cancelled"): Promise<void> {
+    if (this.snapshot.status !== "chooser-required") return;
+    if (this.snapshot.busy) return;
+    await this.answer(decision);
+  }
+
+  private async answer(decision: ApplyDecisionName): Promise<void> {
+    this.set({ busy: true });
+    this.say("Sending your answer to the phone.");
+    const result = await this.deps.respondToDecision(this.input.serial, this.input.fingerprint, decision);
+    if (!result.ok) {
+      this.set({ busy: false, status: "failed", error: result.error });
+      this.say("Your answer could not be sent. Try again.");
+      return;
+    }
+    const dto = parseApplyOutcome(result.value);
+    if (dto === null) {
+      const error: CommandError = {
+        code: "preflight-failed",
+        message: "The phone returned an answer the desktop does not understand.",
+        action: "Reconnect the phone and try again.",
+      };
+      this.set({ busy: false, status: "failed", error });
+      this.say("The phone returned an answer the desktop does not understand. Reconnect and try again.");
+      return;
+    }
+    this.applyOutcome(dto, { viaDecision: decision });
+  }
+
+  /**
+   * Notes one progress payload (JSON text or object). Progress updates
+   * counts and waits, but only a backend outcome completes the flow; a
+   * disconnect invalidates further answers.
+   */
+  noteRemoteProgress(payload: unknown): void {
+    if (isApplyTerminal(this.snapshot.status)) return;
+    const name = normalizeProgressPayload(decodeJsonText(payload));
+    if (name === null) return;
+    const detail = extractProgressDetail(payload);
+    switch (name) {
+      case "started":
+        if (this.snapshot.status === "idle") this.set({ status: "running", busy: true });
+        else this.set({ busy: true });
+        break;
+      case "operation-applied":
+        this.set({ appliedCount: this.snapshot.appliedCount + 1 });
+        break;
+      case "decision-required":
+        this.set({
+          status: "decision-required",
+          busy: false,
+          blockingPackage: detail ?? this.snapshot.blockingPackage,
+        });
+        this.sayDecision();
+        break;
+      case "chooser-required":
+        this.set({ status: "chooser-required", busy: false });
+        this.say("The phone needs the default launcher chosen by hand. Follow the chooser steps on the phone.");
+        break;
+      case "rollback-started":
+        this.set({ status: "rolling-back", busy: true });
+        this.say("Rolling back the completed changes.");
+        break;
+      case "rollback-applied":
+        this.set({ rollbackCount: this.snapshot.rollbackCount + 1 });
+        break;
+      case "completed":
+        // Progress alone never completes: only the backend outcome does.
+        break;
+      case "disconnected":
+        this.set({ status: "recoverable-disconnect", busy: false });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+        break;
+      case "inconsistent-state":
+        this.set({ status: "inconsistent-state", busy: false });
+        this.say("The phone records disagree, so no automatic change is safe.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  private applyOutcome(dto: ApplyOutcomeDto, opts?: { viaDecision?: ApplyDecisionName }): void {
+    const base = {
+      outcome: dto.outcome,
+      partialProtection: [...dto.partialProtection],
+      busy: false as const,
+      error: null as CommandError | null,
+      rolledBackFrom: null as ApplySnapshot["rolledBackFrom"],
+    };
+    switch (dto.outcome) {
+      case "complete":
+        this.set({ ...base, status: "complete", blockingPackage: null });
+        this.say(
+          dto.partialProtection.length > 0
+            ? "Setup is complete and verified on the phone, with partial protection for some paths."
+            : "Setup is complete and verified on the phone.",
+        );
+        break;
+      case "decision-required":
+        this.set({ ...base, status: "decision-required", blockingPackage: dto.package });
+        this.sayDecision();
+        break;
+      case "chooser-required":
+        this.set({ ...base, status: "chooser-required", blockingPackage: null });
+        this.say("The phone needs the default launcher chosen by hand. Follow the chooser steps on the phone.");
+        break;
+      case "rolled-back": {
+        // The backend envelope carries no cause: only a direct rolled-back
+        // (no preceding user rollback/cancel answer in this flow) has a
+        // known store cause (the store hard-failure path). An ordinary user
+        // rollback or chooser cancel uses the generic copy.
+        const via = opts?.viaDecision ?? null;
+        const rolledBackFrom: ApplySnapshot["rolledBackFrom"] =
+          via === "rollback" ? "user-rollback" : via === "home-cancelled" ? "chooser-cancel" : "direct";
+        this.set({ ...base, status: "rolled-back", blockingPackage: null, rolledBackFrom });
+        this.say("Setup was rolled back. The phone is unchanged.");
+        break;
+      }
+      case "recoverable-disconnect":
+        this.set({ ...base, status: "recoverable-disconnect", blockingPackage: null });
+        this.say("The phone stopped responding. Check the USB cable, then try again.");
+        break;
+      case "inconsistent-state":
+        this.set({ ...base, status: "inconsistent-state", blockingPackage: null });
+        this.say("The phone records disagree, so no automatic change is safe.");
+        break;
+    }
+  }
+
+  private sayDecision(): void {
+    const found = blockingAppFor(this.input.entries, this.snapshot.blockingPackage);
+    this.say(
+      found
+        ? `One app could not be fully protected: ${found.label} (${found.packageId}). Choose how to continue before the default launcher changes.`
+        : "One app could not be fully protected. Choose how to continue before the default launcher changes.",
+    );
+  }
+
+  private set(partial: Partial<ApplySnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...partial };
+    this.notify?.();
+  }
+
+  private say(message: string): void {
+    if (message !== this.lastAnnounced) {
+      this.lastAnnounced = message;
+      this.snapshot = { ...this.snapshot, announcement: message };
+      this.announce?.(message);
+      this.notify?.();
+    }
+  }
+}
