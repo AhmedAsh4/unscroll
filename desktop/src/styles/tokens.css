@@ -1,0 +1,36 @@
+/**
+ * Unscroll V1 design tokens (Task 16).
+ * Exact values from the approved UI contract in
+ * docs/superpowers/plans/2026-08-30-unscroll-v1-windows.md.
+ */
+:root {
+  /* Surfaces */
+  --unscroll-surface: #f6f3ec;
+  --unscroll-card: #fffdf8;
+
+  /* Brand */
+  --unscroll-sidebar: #203b31;
+  --unscroll-sage: #245c47;
+  --unscroll-sage-pressed: #1b4636;
+
+  /* Text */
+  --unscroll-text: #183128;
+  --unscroll-muted: #5f6c65;
+
+  /* Borders */
+  --unscroll-border: #cfd8d1;
+
+  /* Layout */
+  --unscroll-bar-height: 54px;
+  --unscroll-rail-width: 210px;
+  --unscroll-rail-collapsed: 64px;
+  --unscroll-content-max: 1050px;
+  --unscroll-min-width: 800px;
+
+  /* Type: system stack only; no network fonts. */
+  --unscroll-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Shape */
+  --unscroll-radius: 10px;
+  --unscroll-radius-small: 6px;
+}

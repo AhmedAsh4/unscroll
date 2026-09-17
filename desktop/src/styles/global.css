@@ -1,0 +1,97 @@
+/**
+ * Unscroll V1 global styles (Task 16).
+ * System font stack and local inline SVG only: no remote fonts, no icon
+ * fetches, no CSS framework. Fluid flexbox/grid plus min-width: 0 keep the
+ * shell usable at the 800px minimum with no horizontal scrolling.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--unscroll-surface);
+  color: var(--unscroll-text);
+  font-family: var(--unscroll-font);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+/* Visible keyboard focus everywhere. */
+:focus-visible {
+  outline: 3px solid var(--unscroll-sage);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect reduced-motion settings: no decorative transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Primary action: sage surfaces carry white text at action sizes/weights. */
+.u-button-primary {
+  background: var(--unscroll-sage);
+  border: 1px solid var(--unscroll-sage);
+  border-radius: var(--unscroll-radius-small);
+  color: #ffffff;
+  font-weight: 600;
+  padding: 10px 20px;
+}
+
+.u-button-primary:hover {
+  background: var(--unscroll-sage-pressed);
+}
+
+.u-button-secondary {
+  background: var(--unscroll-card);
+  border: 1px solid var(--unscroll-border);
+  border-radius: var(--unscroll-radius-small);
+  color: var(--unscroll-text);
+  font-weight: 600;
+  padding: 10px 20px;
+}
+
+/* Screen-reader-only text; never display: none (live regions must persist). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

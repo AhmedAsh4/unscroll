@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<!--
+  PROVENANCE: Tracked Task 16 reference for the Unscroll V1 Guided Workspace.
+  The plan's approved visual source of truth
+  (.superpowers/brainstorm/1610-1788083017/content/guided-workspace-icons-v2.html)
+  is ABSENT from this repository (verified: no such path exists), so this file
+  RECONSTRUCTS the app-shell-only portion from the Approved UI contract in
+  docs/superpowers/plans/2026-08-30-unscroll-v1-windows.md: warm neutral
+  surface #f6f3ec, off-white cards #fffdf8, dark-green sidebar #203b31,
+  primary sage #245c47, text #183128 / muted #5f6c65, borders #cfd8d1,
+  54px top bar, 210px step rail, four named steps (Connect, Choose apps,
+  Review, Apply), connected-device indicator, and ~1050px content target.
+  The brainstorm heading, subtitle, choice card, and inline selection handler
+  outside the shell are NOT product UI and are intentionally omitted.
+  This file is a read-only visual reference; the real implementation lives in
+  desktop/src/lib/components/*.svelte + desktop/src/styles/*.css.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unscroll V1 — Guided Workspace reference (Task 16 reconstruction)</title>
+<style>
+  :root {
+    --surface: #f6f3ec;
+    --card: #fffdf8;
+    --sidebar: #203b31;
+    --sage: #245c47;
+    --text: #183128;
+    --muted: #5f6c65;
+    --border: #cfd8d1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .u-shell { min-height: 100vh; display: flex; flex-direction: column; }
+  .u-bar {
+    height: 54px; flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 0 20px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  .u-bar h1 { font-size: 17px; margin: 0; }
+  .u-bar .spacer { flex: 1; }
+  .u-pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--sage); }
+  .u-body { flex: 1; display: flex; min-height: 0; }
+  .u-rail { flex: none; width: 210px; background: var(--sidebar); color: #fff; }
+  .u-rail ol { list-style: none; margin: 0; padding: 22px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .u-rail li { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 6px; color: rgba(255,255,255,.72); }
+  .u-rail li.current { background: rgba(255,255,255,.12); color: #fff; font-weight: 700; }
+  .u-num { width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; background: rgba(255,255,255,.14); }
+  .u-num.idle { background: transparent; border: 1.5px solid rgba(255,255,255,.4); }
+  .u-main { flex: 1; min-width: 0; padding: 28px 32px 48px; }
+  .u-card { max-width: 1050px; margin: 0 auto; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px 22px; }
+  .u-card h2 { margin: 0 0 6px; font-size: 22px; }
+  .u-card p { margin: 0 0 12px; color: var(--muted); }
+  .u-row { display: flex; gap: 10px; align-items: center; }
+  .u-primary { background: var(--sage); color: #fff; border: 1px solid var(--sage); border-radius: 6px; font-weight: 600; padding: 10px 20px; }
+  @media (max-width: 800px) {
+    .u-rail { width: 64px; }
+    .u-label { display: none; }
+    .u-main { padding: 20px 16px 40px; }
+  }
+</style>
+</head>
+<body>
+<div class="u-shell">
+  <div class="u-bar">
+    <h1>Unscroll</h1>
+    <span class="spacer"></span>
+    <span class="u-pill">● Connected</span>
+  </div>
+  <div class="u-body">
+    <div class="u-rail">
+      <ol>
+        <li class="current"><span class="u-num">1</span><span class="u-label">Connect</span></li>
+        <li><span class="u-num idle">2</span><span class="u-label">Choose apps</span></li>
+        <li><span class="u-num idle">3</span><span class="u-label">Review</span></li>
+        <li><span class="u-num idle">4</span><span class="u-label">Apply</span></li>
+      </ol>
+    </div>
+    <div class="u-main">
+      <div class="u-card">
+        <h2>Connect your phone</h2>
+        <p>Plug in one Android phone over USB with USB debugging enabled.</p>
+        <div class="u-row"><button class="u-primary" type="button">Check for phone</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
