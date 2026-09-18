@@ -85,8 +85,8 @@ jobs:
             "$hash  $($file -replace '\\', '/')"
           }
           Set-Content -LiteralPath SHA256SUMS -Value $sums -Encoding Ascii
-          $lock = Get-Content -LiteralPath desktop/package-lock.json -Raw | ConvertFrom-Json
-          $npmVersion = { param($key) $lock.packages."$key".version }
+          $lock = Get-Content -LiteralPath desktop/package-lock.json -Raw | ConvertFrom-Json -AsHashTable
+          $npmVersion = { param($key) $lock['packages'][$key]['version'] }
           $cargoLock = Get-Content -LiteralPath desktop/src-tauri/Cargo.lock -Raw
           $tauriVersion = ([regex]::Match($cargoLock, '(?ms)name = "tauri"\r?\nversion = "([^"]+)"')).Groups[1].Value
           $adbHashes = @{}
