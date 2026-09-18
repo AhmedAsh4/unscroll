@@ -86,7 +86,9 @@ jobs:
       # Gradle Managed Devices auto-provisions the emulator system
       # image for the matrix API level at task time.
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-      - run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "emulator"
+      - run: >-
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "emulator"
       # GitHub's ubuntu runners expose /dev/kvm as root:kvm (0660) while the
       # runner user is not in the kvm group, so the emulator aborts with
       # "x86_64 emulation currently requires hardware acceleration".
