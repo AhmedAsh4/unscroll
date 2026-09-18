@@ -86,11 +86,14 @@ jobs:
       # Gradle Managed Devices auto-provisions the emulator system
       # image for the matrix API level at task time.
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-      # Diagnostic (temporary): GMD snapshot setup reports "x86_64
-      # emulation currently requires hardware acceleration" on these
-      # runners even though /dev/kvm exists. Record the node, the
-      # runner user's groups, and kvm kernel modules before booting.
-      - name: Check KVM availability
-        run: ls -la /dev/kvm 2>&1 || echo "NO /dev/kvm node"; id; lsmod 2>/dev/null | grep -i kvm || echo "no kvm module visible"
+      # GitHub's ubuntu runners expose /dev/kvm as root:kvm (0660) while the
+      # runner user is not in the kvm group, so the emulator aborts with
+      # "x86_64 emulation currently requires hardware acceleration".
+      # Grant access via a udev rule (standard emulator-CI recipe).
+      - name: Enable KVM group permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - run: chmod +x launcher/gradlew launcher/emulator/run-matrix.sh
       - run: launcher/emulator/run-matrix.sh ${{ matrix.api-level }}
