@@ -46,7 +46,9 @@ jobs:
       # SDK but do not put sdkmanager on PATH, so it is invoked by full
       # path under $ANDROID_HOME.
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-      - run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+      - run: >-
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "platforms;android-36" "build-tools;36.0.0"
       - run: chmod +x launcher/gradlew
       - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
         working-directory: launcher
