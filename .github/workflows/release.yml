@@ -1,0 +1,257 @@
+# Unscroll V1 Windows release pipeline (Task 21).
+#
+# Windows 10/11 x64 only. Produces a signed NSIS installer when SignPath
+# secrets are present; otherwise labels the build *-unsigned-dev* and refuses
+# to publish it as a consumer release. Never silently installs unsigned code
+# or vendor drivers.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android build packages
+        run: |
+          & "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat" "platforms;android-36" "build-tools;36.0.0"
+      - name: Prepare pinned ADB runtime
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-adb.ps1
+      - name: Build release launcher APK (build output, never committed)
+        run: .\gradlew.bat --no-daemon :app:assembleRelease
+        working-directory: launcher
+      - name: Extract stable APK signing identity
+        run: |
+          $apk = 'launcher\app\build\outputs\apk\release\app-release.apk'
+          $certs = & "$env:ANDROID_HOME\build-tools\36.0.0\apksigner.bat" verify --print-certs $apk
+          if ($LASTEXITCODE -ne 0) { throw "Release APK failed apksigner verification: $apk`n$certs" }
+          $digest = ($certs | Select-String -Pattern 'SHA-256 digest:\s*([0-9A-Fa-f:]+)').Matches.Groups[1].Value -replace ':', ''
+          $digest = $digest.Trim().ToLowerInvariant()
+          if ($digest -cnotmatch '^[0-9a-f]{64}$') { throw "Could not read a stable signing identity from: $apk`n$certs" }
+          "SIGNING_SHA256=$digest" >> $env:GITHUB_ENV
+          "Release APK signing identity: $digest"
+      - name: Stage release inputs (fail-closed)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.ps1 -LauncherApk launcher/app/build/outputs/apk/release/app-release.apk -SigningSha256 $env:SIGNING_SHA256
+      - name: Verify staged inputs
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.ps1 -VerifyOnly
+      - name: Run stager tests (focused, no network, no device)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.tests.ps1
+      - name: Generate SHA256SUMS and SBOM
+        # PowerShell 7: Windows PowerShell 5.1 (the runner default for
+        # `powershell` invocations) rejects the empty-name root key in
+        # package-lock.json, while PowerShell 7 parses it fine.
+        shell: pwsh
+        run: |
+          $inputs = @(
+            'desktop/src-tauri/resources/adb/adb.exe',
+            'desktop/src-tauri/resources/adb/AdbWinApi.dll',
+            'desktop/src-tauri/resources/adb/AdbWinUsbApi.dll',
+            'desktop/src-tauri/resources/launcher/unscroll-launcher.apk'
+          )
+          $sums = foreach ($file in $inputs) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            "$hash  $($file -replace '\\', '/')"
+          }
+          Set-Content -LiteralPath SHA256SUMS -Value $sums -Encoding Ascii
+          $lock = Get-Content -LiteralPath desktop/package-lock.json -Raw | ConvertFrom-Json
+          $npmVersion = { param($key) $lock.packages."$key".version }
+          $cargoLock = Get-Content -LiteralPath desktop/src-tauri/Cargo.lock -Raw
+          $tauriVersion = ([regex]::Match($cargoLock, '(?ms)name = "tauri"\r?\nversion = "([^"]+)"')).Groups[1].Value
+          $adbHashes = @{}
+          foreach ($file in $inputs[0..2]) {
+            $adbHashes[[IO.Path]::GetFileName($file)] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+          }
+          $apkHash = (Get-FileHash -LiteralPath $inputs[3] -Algorithm SHA256).Hash
+          $signing = (Get-Content -LiteralPath desktop/src-tauri/resources/launcher/unscroll-launcher.apk.sha256 -Raw).Trim()
+          $component = { param($name, $version, $hash) @{ type = 'library'; name = $name; version = $version; hashes = @(@{ alg = 'SHA-256'; content = $hash }) } }
+          $sbom = [ordered]@{
+            bomFormat = 'CycloneDX'; specVersion = '1.5'; version = 1
+            metadata = @{ component = @{ type = 'application'; name = 'unscroll-desktop'; version = '0.1.0' } }
+            components = @(
+              (& $component 'adb.exe' '37.0.1' $adbHashes['adb.exe']),
+              (& $component 'AdbWinApi.dll' '37.0.1' $adbHashes['AdbWinApi.dll']),
+              (& $component 'AdbWinUsbApi.dll' '37.0.1' $adbHashes['AdbWinUsbApi.dll']),
+              @{ type = 'application'; name = 'unscroll-launcher'; version = 'Unscroll Launcher 1.0 (111)';
+                 hashes = @(@{ alg = 'SHA-256'; content = $apkHash }); properties = @(@{ name = 'signing-sha256'; value = $signing }) },
+              @{ type = 'library'; name = 'tauri'; version = $tauriVersion },
+              @{ type = 'library'; name = '@tauri-apps/api'; version = (& $npmVersion 'node_modules/@tauri-apps/api') },
+              @{ type = 'library'; name = '@tauri-apps/cli'; version = (& $npmVersion 'node_modules/@tauri-apps/cli') },
+              @{ type = 'library'; name = 'svelte'; version = (& $npmVersion 'node_modules/svelte') },
+              @{ type = 'library'; name = 'vite'; version = (& $npmVersion 'node_modules/vite') },
+              @{ type = 'library'; name = 'typescript'; version = (& $npmVersion 'node_modules/typescript') }
+            )
+          }
+          $sbom | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath sbom.json -Encoding utf8NoBOM
+          Get-Content -LiteralPath SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staged-release-inputs
+          path: |
+            desktop/src-tauri/resources/launcher/unscroll-launcher.apk
+            desktop/src-tauri/resources/launcher/unscroll-launcher.apk.sha256
+            SHA256SUMS
+            sbom.json
+
+  bundle:
+    needs: stage
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged-release-inputs
+      - name: Confirm staged launcher inputs are in place
+        run: |
+          Get-ChildItem -LiteralPath desktop/src-tauri/resources/launcher
+          if (-not (Test-Path -LiteralPath desktop/src-tauri/resources/launcher/unscroll-launcher.apk -PathType Leaf)) { throw 'Staged launcher APK did not arrive from the stage job' }
+          if (-not (Test-Path -LiteralPath desktop/src-tauri/resources/launcher/unscroll-launcher.apk.sha256 -PathType Leaf)) { throw 'Staged signing sidecar did not arrive from the stage job' }
+      - name: Prepare pinned ADB runtime
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-adb.ps1
+      - name: Verify staged inputs before bundling
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.ps1 -VerifyOnly
+      - run: npm ci
+        working-directory: desktop
+      - name: Build NSIS installer (Windows x64)
+        run: npm run tauri -- build
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsis-installer
+          path: desktop/src-tauri/target/release/bundle/nsis/*
+
+  sign:
+    needs: bundle
+    runs-on: windows-latest
+    outputs:
+      unsigned: ${{ steps.flag.outputs.unsigned }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nsis-installer
+          path: installer
+      - uses: actions/upload-artifact@v4
+        id: tosign
+        with:
+          name: to-sign
+          path: installer/*
+      - name: Authenticode sign via SignPath Foundation
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: SignPath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.tosign.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-installer
+      - name: Label unsigned dev build
+        id: flag
+        if: ${{ secrets.SIGNPATH_API_TOKEN == '' }}
+        run: |
+          New-Item -ItemType Directory -Path unsigned-dev -Force | Out-Null
+          foreach ($file in Get-ChildItem -LiteralPath installer -File) {
+            $devName = $file.BaseName + '-unsigned-dev' + $file.Extension
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path unsigned-dev $devName)
+          }
+          "UNSIGNED_BUILD=1" >> $env:GITHUB_ENV
+          "unsigned=true" >> $env:GITHUB_OUTPUT
+          Get-ChildItem -LiteralPath unsigned-dev
+      - uses: actions/upload-artifact@v4
+        with:
+          name: releasable-installer
+          path: |
+            signed-installer
+            unsigned-dev
+
+  verify:
+    needs: sign
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: releasable-installer
+          path: releasable
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged-release-inputs
+          path: staged
+      - name: Verify signatures and staged provenance
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath releasable -Recurse -File -Include *.exe)
+          if ($installers.Count -eq 0) { throw 'No installer found in the releasable artifact' }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+            if ($installer.BaseName -like '*-unsigned-dev*') {
+              if ($env:GITHUB_REF -like 'refs/tags/v*') {
+                throw "Refusing unsigned installer on version tag ${env:GITHUB_REF}: $($installer.Name)"
+              }
+              "Unsigned dev build (never a consumer release): $($installer.Name)"
+            } elseif ($signature.Status -ne 'Valid') {
+              throw "Installer signature is not valid: $($installer.Name) ($($signature.Status))"
+            } else {
+              "Signed installer verified: $($installer.Name) ($($signature.SignerCertificate.Subject))"
+            }
+          }
+          $apk = 'staged/desktop/src-tauri/resources/launcher/unscroll-launcher.apk'
+          if (-not (Test-Path -LiteralPath $apk)) { $apk = (Get-ChildItem -LiteralPath staged -Recurse -Filter unscroll-launcher.apk | Select-Object -First 1).FullName }
+          if (-not $apk) { throw 'Staged launcher APK missing from release provenance' }
+          $sums = Get-Content -LiteralPath ((Get-ChildItem -LiteralPath staged -Recurse -Filter SHA256SUMS | Select-Object -First 1).FullName)
+          $apkHash = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash
+          if ($sums -notmatch $apkHash) { throw 'Staged launcher APK hash is not in SHA256SUMS' }
+          $sidecar = "$apk.sha256"
+          if ((Get-Content -LiteralPath $sidecar -Raw).Trim() -cnotmatch '^[0-9a-f]{64}$') { throw 'Staged signing sidecar is not lowercase hex64' }
+          'Installer ships only the pinned, checksummed staged inputs (deep payload validation re-runs at device preflight).'
+
+  publish:
+    needs:
+      - sign
+      - verify
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: releasable-installer
+          path: releasable
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged-release-inputs
+          path: staged
+      - name: Refuse unsigned consumer release
+        if: ${{ needs.sign.outputs.unsigned == 'true' }}
+        run: |
+          throw 'Public release job FAILS while unsigned: configure SignPath secrets (see docs/release/signing.md) and re-run.'
+      - name: Create GitHub release with checksums and SBOM
+        run: |
+          $files = @(Get-ChildItem -LiteralPath releasable -Recurse -File -Include *.exe | ForEach-Object { $_.FullName })
+          $files += @(Get-ChildItem -LiteralPath staged -Recurse -File -Include SHA256SUMS, sbom.json | ForEach-Object { $_.FullName })
+          gh release create "${{ github.ref_name }}" --title "Unscroll ${{ github.ref_name }}" --notes "Windows 10/11 x64 NSIS installer with checksums (SHA256SUMS) and SBOM (sbom.json). See docs/release/windows.md for clean-machine install steps." @files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -13,17 +13,26 @@
     "windows": [
       {
         "title": "Unscroll",
-        "width": 800,
+        "width": 1050,
+        "minWidth": 800,
         "height": 600,
         "resizable": true
       }
     ]
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
     "externalBin": [],
     "resources": {
-      "resources/adb/*": "adb/"
+      "resources/adb/*": "adb/",
+      "resources/launcher/*": "launcher/"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "Unscroll"
+      }
     }
   }
 }
