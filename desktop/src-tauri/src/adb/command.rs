@@ -298,7 +298,7 @@ impl BridgeOperation {
             "--method".into(),
             "bridge-v1".into(),
             "--extra".into(),
-            format!("request:s:{}", request.expect("call request")),
+            format!("request:s:{}", request.expect("call request").replace('\\', "\\\\").replace(':', "\\:")),
         ]
     }
 }

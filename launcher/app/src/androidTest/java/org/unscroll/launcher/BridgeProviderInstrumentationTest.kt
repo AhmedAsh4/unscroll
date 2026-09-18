@@ -25,7 +25,8 @@ class BridgeProviderInstrumentationTest {
         ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
     }
     private fun shellQuote(value: String) = "'" + value.replace("'", "'\"'\"'") + "'"
-    private fun call(operation: String, arguments: String = "{}", caller: String = ""): String = shell("$caller content call --uri content://org.unscroll.launcher.bridge --method bridge-v1 --extra ${shellQuote("request:s:${request(operation, arguments)}")} 2>&1").decodeToString()
+    private fun contentStringBinding(value: String) = "request:s:" + value.replace("\\", "\\\\").replace(":", "\\:")
+    private fun call(operation: String, arguments: String = "{}", caller: String = ""): String = shell("$caller /system/bin/content call --uri content://org.unscroll.launcher.bridge --method bridge-v1 --extra ${shellQuote(contentStringBinding(request(operation, arguments)))} 2>&1").decodeToString()
     private fun success(response: String) = assertTrue(response, response.contains("\"ok\":true"))
     private fun field(response: String, name: String): String = Regex("\\\"$name\\\":\\\"([^\\\"]+)\\\"").find(response)?.groupValues?.get(1) ?: error("missing $name: $response")
     private fun number(response: String, name: String): Int = Regex("\\\"$name\\\":([0-9]+)").find(response)?.groupValues?.get(1)?.toInt() ?: error("missing $name: $response")
@@ -45,9 +46,10 @@ class BridgeProviderInstrumentationTest {
         assertTrue(ordinaryPackage != instrumentation.targetContext.packageName)
         assertTrue(ordinaryUid != instrumentation.targetContext.applicationInfo.uid)
         assertTrue(ordinaryUid != Process.SHELL_UID)
-        assertEquals(ordinaryUid.toString(), shell("run-as ${shellQuote(ordinaryPackage)} id -u").decodeToString().trim())
+        val runAs = "/system/bin/run-as ${shellQuote(ordinaryPackage)}"
+        assertEquals(ordinaryUid.toString(), shell("$runAs /system/bin/id -u 2>&1").decodeToString().trim())
         listOf("read_envelope", "write_envelope").forEach { operation ->
-            val denied = call(operation, """{"device_binding":{}}""", "run-as ${shellQuote(ordinaryPackage)}")
+            val denied = call(operation, """{"device_binding":{}}""", runAs)
             assertTrue(denied, denied.contains("SecurityException") || denied.contains("Permission Denial"))
         }
     }

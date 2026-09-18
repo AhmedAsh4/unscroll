@@ -19,6 +19,22 @@ fn fixture(name: &str) -> String {
     .expect("fixture")
 }
 
+fn content_string_value(binding: &str) -> String {
+    let mut fields = vec![String::new()];
+    let mut escaping = false;
+    for ch in binding.chars() {
+        if escaping { fields.last_mut().unwrap().push(ch); escaping = false; }
+        else if ch == '\\' { escaping = true; }
+        else if ch == ':' { fields.push(String::new()); }
+        else { fields.last_mut().unwrap().push(ch); }
+    }
+    assert!(!escaping);
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[0], "request");
+    assert_eq!(fields[1], "s");
+    fields.pop().unwrap()
+}
+
 #[test]
 fn discovers_one_authorized_windows_usb_device_without_optional_usb_metadata() {
     let mut adb = FakeAdb::scripted([
@@ -310,9 +326,16 @@ fn probe_commands_are_closed_validated_argument_arrays() {
             "--method",
             "bridge-v1",
             "--extra",
-            "request:s:{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}"
+            r#"request:s:{"protocol_version"\:"bridge-v1","operation"\:"health","arguments"\:{}}"#
         ]
     );
+    let health = AdbCommand::Device { serial: serial.clone(), operation: DeviceOperation::Bridge(BridgeOperation::Health) }.arguments();
+    assert_eq!(content_string_value(health.last().unwrap()), "{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}");
+    let envelope = RecoveryEnvelope::parse(include_str!("../../../contracts/fixtures/recovery-v1/valid/new-baseline.json").trim()).unwrap();
+    let write = AdbCommand::Device { serial: serial.clone(), operation: DeviceOperation::Bridge(BridgeOperation::WriteEnvelope { device_serial: serial.clone(), fingerprint: unscroll_desktop_lib::adb::Fingerprint::parse("google/pixel/test").unwrap(), envelope }) }.arguments();
+    let restored = content_string_value(write.last().unwrap());
+    assert!(write.last().unwrap().contains("\\\\"));
+    assert!(restored.contains("\"envelope\":\"{\\\"active_policy\\\""));
     assert_eq!(
         AdbCommand::Device { serial, operation: DeviceOperation::Bridge(BridgeOperation::ReadIcon(icon)) }.arguments(),
         vec!["-s", "emulator-5554", "shell", "content", "read", "--uri", "content://org.unscroll.launcher.bridge/bridge-v1/icon/0123456789abcdef0123456789abcdef"]
