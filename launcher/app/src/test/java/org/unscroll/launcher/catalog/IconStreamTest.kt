@@ -3,8 +3,7 @@ package org.unscroll.launcher.catalog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.ByteArrayInputStream
-import javax.imageio.ImageIO
+import java.nio.ByteBuffer
 
 class IconStreamTest {
     @Test
@@ -24,8 +23,12 @@ class IconStreamTest {
     }
 
     @Test
-    fun `png payload decodes on the desktop JVM`() {
-        assertEquals(1, ImageIO.read(ByteArrayInputStream(ONE_PIXEL_PNG)).width)
+    fun `png payload carries 1x1 dimensions in its IHDR chunk`() {
+        // javax.imageio is desktop-JVM-only and absent from the Android
+        // unit-test classpath, so dimensions are read straight from IHDR:
+        // width is the big-endian int at offset 16, height at offset 20.
+        assertEquals(1, ByteBuffer.wrap(ONE_PIXEL_PNG).getInt(16))
+        assertEquals(1, ByteBuffer.wrap(ONE_PIXEL_PNG).getInt(20))
     }
 
     companion object {
