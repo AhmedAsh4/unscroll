@@ -1,0 +1,10 @@
+// Task 20: init script that adds the emulator matrix to `:app` without
+// editing any build file or app logic. The managed-device definitions live
+// in `managed-devices.gradle` next to this file (single source of truth);
+// this script only applies them. Used by `run-matrix.sh` via
+// `./gradlew -I emulator/init-managed-devices.gradle ...`.
+gradle.allprojects { project ->
+  if (project.path == ':app') {
+    project.apply from: "${project.rootDir}/emulator/managed-devices.gradle"
+  }
+}

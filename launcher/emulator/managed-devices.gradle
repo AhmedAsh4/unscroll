@@ -1,0 +1,53 @@
+// Task 20 emulator matrix: Gradle managed-device definitions for the exact
+// V1 API matrix (24, 28, 29, 33, 36). New file only: it is injected into
+// `:app` by the sibling `init-managed-devices.gradle` init script (used via
+// `gradlew -I`), so no build file or app logic is touched. Each device runs the same four Android gates on its API level:
+// allowlist filtering, bridge DUMP security (shell-allowed / app-denied),
+// recovery schema accept/reject, and HOME intent handling (see
+// `api-test-filter.md` next to this file).
+//
+// Usage (also invoked per level by `run-matrix.sh`):
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel24DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel28DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel29DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel33DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel36DebugAndroidTest
+android {
+    testOptions {
+        managedDevices {
+            devices {
+                // API 24 (Android 7.0): minimum supported. Plain AOSP image;
+                // no adaptive icons, no notification channels on this level.
+                pixel24(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = "Pixel 6"
+                    apiLevel = 24
+                    systemImageSource = "aosp"
+                }
+                // API 28 (Android 9): pre-scoped-storage behavior baseline.
+                pixel28(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = "Pixel 6"
+                    apiLevel = 28
+                    systemImageSource = "aosp"
+                }
+                // API 29 (Android 10): scoped storage + fully gestural nav.
+                pixel29(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = "Pixel 6"
+                    apiLevel = 29
+                    systemImageSource = "aosp"
+                }
+                // API 33 (Android 13): runtime notification permission.
+                pixel33(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = "Pixel 6"
+                    apiLevel = 33
+                    systemImageSource = "aosp-atd"
+                }
+                // API 36 (Android 16): current target/compile SDK.
+                pixel36(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = "Pixel 6"
+                    apiLevel = 36
+                    systemImageSource = "aosp-atd"
+                }
+            }
+        }
+    }
+}

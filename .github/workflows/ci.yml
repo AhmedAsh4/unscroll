@@ -22,6 +22,8 @@ jobs:
       - run: npm run check --prefix desktop
       - run: npm run build --prefix desktop
       - run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --locked
+      - run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+      - run: node --test "desktop/src/tests/*.test.ts" "desktop/src/tests/scenarios/*.test.ts"
       - run: git diff --exit-code -- desktop/package-lock.json desktop/src-tauri/Cargo.lock launcher/settings-gradle.lockfile launcher/app/gradle.lockfile
 
   android:
@@ -39,3 +41,25 @@ jobs:
         working-directory: launcher
       - run: test -f LICENSE && test -f THIRD_PARTY_NOTICES.md && test -f launcher/LICENSE && test -f launcher/UPSTREAM.md
       - run: git diff --exit-code -- desktop/package-lock.json desktop/src-tauri/Cargo.lock launcher/settings-gradle.lockfile launcher/app/gradle.lockfile
+
+  # Task 20 emulator matrix: exactly API 24, 28, 29, 33, 36. Each leg runs
+  # launcher/emulator/run-matrix.sh (unit gate + managed-device instrumented
+  # gate for its API). fail-fast keeps failures blocking. Store, bridge,
+  # reconciliation, and HOME failures are hard failures, never flaky; the
+  # only permitted retry is one manual re-run of a leg that failed on
+  # documented emulator-boot/harness infra with no test assertion recorded.
+  android-emulator:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        api-level: [24, 28, 29, 33, 36]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - run: chmod +x launcher/gradlew launcher/emulator/run-matrix.sh
+      - run: launcher/emulator/run-matrix.sh ${{ matrix.api-level }}
