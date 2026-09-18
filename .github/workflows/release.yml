@@ -244,9 +244,9 @@ jobs:
           $apk = 'staged/desktop/src-tauri/resources/launcher/unscroll-launcher.apk'
           if (-not (Test-Path -LiteralPath $apk)) { $apk = (Get-ChildItem -LiteralPath staged -Recurse -Filter unscroll-launcher.apk | Select-Object -First 1).FullName }
           if (-not $apk) { throw 'Staged launcher APK missing from release provenance' }
-          $sums = Get-Content -LiteralPath ((Get-ChildItem -LiteralPath staged -Recurse -Filter SHA256SUMS | Select-Object -First 1).FullName)
+          $sumsText = (Get-Content -LiteralPath ((Get-ChildItem -LiteralPath staged -Recurse -Filter SHA256SUMS | Select-Object -First 1).FullName)) -join "`n"
           $apkHash = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash
-          if ($sums -notmatch $apkHash) { throw 'Staged launcher APK hash is not in SHA256SUMS' }
+          if ($sumsText -notmatch $apkHash) { throw 'Staged launcher APK hash is not in SHA256SUMS' }
           $sidecar = "$apk.sha256"
           if ((Get-Content -LiteralPath $sidecar -Raw).Trim() -cnotmatch '^[0-9a-f]{64}$') { throw 'Staged signing sidecar is not lowercase hex64' }
           'Installer ships only the pinned, checksummed staged inputs (deep payload validation re-runs at device preflight).'
