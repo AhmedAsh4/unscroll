@@ -23,4 +23,6 @@ cd "$(dirname "$0")/.."
 # (shell-allowed / app-denied), recovery schema accept/reject, icon stream,
 # and manifest/HOME capabilities on the live emulator image. The matrix
 # devices are injected via the init script so no build file is modified.
-./gradlew --no-daemon -I emulator/init-managed-devices.gradle "pixel${API}DebugAndroidTest"
+# API 24 is below Gradle's managed-device minimum (26), so the documented
+# opt-in is passed for every leg (it is a no-op on API 28+).
+./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true "pixel${API}DebugAndroidTest"

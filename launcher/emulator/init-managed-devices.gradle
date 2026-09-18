@@ -3,8 +3,23 @@
 // in `managed-devices.gradle` next to this file (single source of truth);
 // this script only applies them. Used by `run-matrix.sh` via
 // `./gradlew -I emulator/init-managed-devices.gradle ...`.
-gradle.allprojects { project ->
-  if (project.path == ':app') {
-    project.apply from: "${project.rootDir}/emulator/managed-devices.gradle"
+// `gradle.allprojects` is too early: it fires before `:app` evaluates its
+// build script, so the `com.android.application` plugin (and its `android`
+// extension) does not exist yet and `managed-devices.gradle` fails with
+// "Could not find method android()". Deferring through `plugins.withId`
+// applies the definitions right after the Android plugin registers its
+// extension, during normal `:app` evaluation.
+gradle.projectsLoaded {
+  gradle.rootProject.project(':app') { app ->
+    app.plugins.withId('com.android.application') {
+      // The AGP DSL type is not visible to init-script classloaders as a
+      // literal (`com.android...` fails with "unknown property 'com'"), so
+      // it is loaded from `:app`'s buildscript classpath (which contains
+      // AGP) and exposed as an extra property. `managed-devices.gradle`
+      // consumes it as `managedVirtualDeviceType`.
+      app.ext.managedVirtualDeviceType = Class.forName(
+        'com.android.build.api.dsl.ManagedVirtualDevice', true, app.buildscript.classLoader)
+      app.apply from: "${app.rootDir}/emulator/managed-devices.gradle"
+    }
   }
 }
