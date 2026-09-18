@@ -43,9 +43,10 @@ jobs:
       # it unconditionally installs the obsolete `tools` package, which no
       # longer exists in current cmdline-tools (sdkmanager exits 1 with
       # "Failed to find package 'tools'"). ubuntu runners preinstall the
-      # SDK + cmdline-tools, so sdkmanager is invoked directly.
-      - run: yes | sdkmanager --licenses > /dev/null
-      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      # SDK but do not put sdkmanager on PATH, so it is invoked by full
+      # path under $ANDROID_HOME.
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+      - run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
       - run: chmod +x launcher/gradlew
       - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
         working-directory: launcher
@@ -71,9 +72,9 @@ jobs:
           distribution: temurin
           java-version: '21'
       # Same note as the android job: setup-android@v3 is broken
-      # (obsolete `tools` package), so sdkmanager is used directly.
+      # (obsolete `tools` package), so sdkmanager is used by full path.
       # Gradle Managed Devices auto-provisions the emulator system
       # image for the matrix API level at task time.
-      - run: yes | sdkmanager --licenses > /dev/null
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
       - run: chmod +x launcher/gradlew launcher/emulator/run-matrix.sh
       - run: launcher/emulator/run-matrix.sh ${{ matrix.api-level }}

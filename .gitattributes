@@ -1,0 +1,5 @@
+# Canonicalize hash-pinned files: prepare-adb.ps1 fail-closes on the
+# SHA-256 of third_party/adb/LICENSE, so every checkout on every
+# machine must produce byte-identical content regardless of the local
+# core.autocrlf setting. The pinned bytes are LF.
+third_party/adb/LICENSE text eol=lf
