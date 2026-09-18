@@ -3,3 +3,6 @@
 # machine must produce byte-identical content regardless of the local
 # core.autocrlf setting. The pinned bytes are LF.
 third_party/adb/LICENSE text eol=lf
+# The emulator matrix runner executes via a shebang on Linux CI; CRLF
+# would break interpreter lookup, so its endings are pinned too.
+launcher/emulator/run-matrix.sh text eol=lf

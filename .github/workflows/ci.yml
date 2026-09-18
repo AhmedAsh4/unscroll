@@ -78,5 +78,10 @@ jobs:
       # Gradle Managed Devices auto-provisions the emulator system
       # image for the matrix API level at task time.
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+      # Diagnostic (temporary): GMD snapshot setup reports "x86_64
+      # emulation currently requires hardware acceleration" on these
+      # runners. Record whether /dev/kvm exists before booting anything.
+      - name: Check KVM availability
+        run: ls -la /dev/kvm 2>&1 || echo "NO /dev/kvm node"
       - run: chmod +x launcher/gradlew launcher/emulator/run-matrix.sh
       - run: launcher/emulator/run-matrix.sh ${{ matrix.api-level }}
