@@ -15,6 +15,10 @@
         android:theme="@style/AppTheme"
         tools:ignore="UnusedAttribute">
 
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            tools:node="remove" />
+
         <provider
             android:name=".bridge.UnscrollProvider"
             android:authorities="org.unscroll.launcher.bridge"

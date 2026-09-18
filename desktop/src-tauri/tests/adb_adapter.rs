@@ -310,9 +310,7 @@ fn probe_commands_are_closed_validated_argument_arrays() {
             "--method",
             "bridge-v1",
             "--extra",
-            "string",
-            "request",
-            "{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}"
+            "request:s:{\"protocol_version\":\"bridge-v1\",\"operation\":\"health\",\"arguments\":{}}"
         ]
     );
     assert_eq!(

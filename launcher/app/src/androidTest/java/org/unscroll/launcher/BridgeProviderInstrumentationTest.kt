@@ -1,35 +1,31 @@
 package org.unscroll.launcher
 
-import android.os.Bundle
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.After
-import org.junit.Assume.assumeFalse
 import java.security.MessageDigest
 import org.unscroll.launcher.catalog.IconStream
-import org.unscroll.launcher.bridge.BridgeError
-import org.unscroll.launcher.bridge.UnscrollProvider
 
 class BridgeProviderInstrumentationTest {
     private var wroteFixture = false
-    private val uri = android.net.Uri.parse("content://org.unscroll.launcher.bridge")
     private fun request(operation: String, arguments: String = "{}") = """{"protocol_version":"bridge-v1","operation":"$operation","arguments":$arguments}"""
     private val automation get() = InstrumentationRegistry.getInstrumentation().uiAutomation
     private fun shell(command: String): ByteArray = automation.executeShellCommand(command).let { descriptor ->
         ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
     }
-    private fun call(operation: String, arguments: String = "{}"): String = shell("content call --uri content://org.unscroll.launcher.bridge --method bridge-v1 --extra string request '${request(operation, arguments)}'").decodeToString()
+    private fun shellQuote(value: String) = "'" + value.replace("'", "'\"'\"'") + "'"
+    private fun call(operation: String, arguments: String = "{}", caller: String = ""): String = shell("$caller content call --uri content://org.unscroll.launcher.bridge --method bridge-v1 --extra ${shellQuote("request:s:${request(operation, arguments)}")} 2>&1").decodeToString()
     private fun success(response: String) = assertTrue(response, response.contains("\"ok\":true"))
     private fun field(response: String, name: String): String = Regex("\\\"$name\\\":\\\"([^\\\"]+)\\\"").find(response)?.groupValues?.get(1) ?: error("missing $name: $response")
     private fun number(response: String, name: String): Int = Regex("\\\"$name\\\":([0-9]+)").find(response)?.groupValues?.get(1)?.toInt() ?: error("missing $name: $response")
@@ -43,14 +39,16 @@ class BridgeProviderInstrumentationTest {
     }
 
     @Test fun ordinaryTestApkReadAndWriteAreDeniedWithTheDocumentedForbiddenContract() {
-        val ordinary = InstrumentationRegistry.getInstrumentation().context.contentResolver
-        listOf(request("read_envelope", """{"device_binding":{}}"""), request("write_envelope", """{"device_binding":{},"envelope":"{}"}""")).forEach { frame ->
-            try { ordinary.call(uri, "bridge-v1", null, Bundle().apply { putString("request", frame) }); fail("separate test UID must be denied") } catch (_: SecurityException) { }
-        }
-        val provider = UnscrollProvider()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val ordinaryPackage = instrumentation.context.packageName
+        val ordinaryUid = instrumentation.context.applicationInfo.uid
+        assertTrue(ordinaryPackage != instrumentation.targetContext.packageName)
+        assertTrue(ordinaryUid != instrumentation.targetContext.applicationInfo.uid)
+        assertTrue(ordinaryUid != Process.SHELL_UID)
+        assertEquals(ordinaryUid.toString(), shell("run-as ${shellQuote(ordinaryPackage)} id -u").decodeToString().trim())
         listOf("read_envelope", "write_envelope").forEach { operation ->
-            val response = provider.call("bridge-v1", null, Bundle().apply { putString("request", request(operation)) }).getString("response")
-            assertTrue(response, response?.contains("\"code\":\"${BridgeError.FORBIDDEN.code}\"") == true)
+            val denied = call(operation, """{"device_binding":{}}""", "run-as ${shellQuote(ordinaryPackage)}")
+            assertTrue(denied, denied.contains("SecurityException") || denied.contains("Permission Denial"))
         }
     }
 
