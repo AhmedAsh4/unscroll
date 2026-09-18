@@ -37,7 +37,19 @@ jobs:
           & "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat" "platforms;android-36" "build-tools;36.0.0"
       - name: Prepare pinned ADB runtime
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-adb.ps1
+      - name: Restore launcher release keystore (secret, never committed)
+        env:
+          LAUNCHER_KEYSTORE_BASE64: ${{ secrets.LAUNCHER_KEYSTORE_BASE64 }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:LAUNCHER_KEYSTORE_BASE64)) { throw 'LAUNCHER_KEYSTORE_BASE64 secret is missing: the release APK cannot be signed with the stable identity (see docs/release/signing.md).' }
+          $ks = 'launcher/unscroll-release.jks'
+          [IO.File]::WriteAllBytes($ks, [Convert]::FromBase64String($env:LAUNCHER_KEYSTORE_BASE64))
+          "UNSCROLL_KEYSTORE_FILE=$((Resolve-Path -LiteralPath $ks).Path)" >> $env:GITHUB_ENV
       - name: Build release launcher APK (build output, never committed)
+        env:
+          UNSCROLL_STORE_PASSWORD: ${{ secrets.LAUNCHER_STORE_PASSWORD }}
+          UNSCROLL_KEY_ALIAS: ${{ secrets.LAUNCHER_KEY_ALIAS }}
+          UNSCROLL_KEY_PASSWORD: ${{ secrets.LAUNCHER_KEY_PASSWORD }}
         run: .\gradlew.bat --no-daemon :app:assembleRelease
         working-directory: launcher
       - name: Extract stable APK signing identity

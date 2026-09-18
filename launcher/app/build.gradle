@@ -1,6 +1,23 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+// Stable release signing identity (v0.1.0 release blocker). The keystore and
+// its passwords never enter git: CI provides them through UNSCROLL_KEYSTORE_*
+// environment variables (restored from secrets), while local builds read
+// launcher/keystore.properties (git-ignored) as a fallback. An unsigned
+// release APK fails the release pipeline at apksigner verification by design.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def releaseStoreFile = rootProject.file(System.getenv('UNSCROLL_KEYSTORE_FILE') ?: keystoreProps.getProperty('storeFile', 'unscroll-release.jks'))
+def releaseStorePassword = System.getenv('UNSCROLL_STORE_PASSWORD') ?: keystoreProps.getProperty('storePassword', '')
+def releaseKeyAlias = System.getenv('UNSCROLL_KEY_ALIAS') ?: keystoreProps.getProperty('keyAlias', 'unscroll')
+// PKCS12 keystores ignore a distinct key password, so an unset key password
+// falls back to the store password rather than failing cryptically.
+def releaseKeyPassword = System.getenv('UNSCROLL_KEY_PASSWORD') ?: keystoreProps.getProperty('keyPassword', releaseStorePassword)
+
 android {
     compileSdk 36
 
@@ -24,11 +41,26 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        release {
+            storeFile releaseStoreFile
+            storePassword releaseStorePassword
+            keyAlias releaseKeyAlias
+            keyPassword releaseKeyPassword
+        }
+    }
+
     buildTypes {
         release {
             debuggable false
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // The stable release identity applies only when the keystore is
+            // present; other builds stay unsigned and the release pipeline
+            // rejects them at apksigner verification.
+            if (releaseStorePassword && releaseStoreFile.isFile()) {
+                signingConfig signingConfigs.release
+            }
         }
         debug {
             debuggable true
