@@ -10,12 +10,15 @@
 // buildscript classpath, since the AGP DSL type is not visible to init
 // scripts as a class literal); device entries below must use that variable.
 //
-// Usage (also invoked per level by `run-matrix.sh`):
-//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel24DebugAndroidTest
-//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel28DebugAndroidTest
-//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel29DebugAndroidTest
-//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel33DebugAndroidTest
-//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle pixel36DebugAndroidTest
+// Usage (also invoked per level by `run-matrix.sh`, which additionally
+// runs `:app:testDebugUnitTest` first in the same invocation):
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true pixel24DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true pixel28DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true pixel29DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true pixel33DebugAndroidTest
+//   ./gradlew --no-daemon -I emulator/init-managed-devices.gradle -Pandroid.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true pixel36DebugAndroidTest
+// The experimental flag is required on every invocation (not just API 24:
+// pixel24 is created at configuration time for all of them).
 android {
     testOptions {
         managedDevices {

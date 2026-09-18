@@ -39,6 +39,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # Gradle dependency/build cache: the five matrix legs plus the
+      # android job otherwise resolve the world concurrently on cold
+      # runners and trip Maven Central rate limits ("Could not find /
+      # Could not parse POM" for artifacts that exist).
+      - uses: gradle/actions/setup-gradle@v4
       # NOTE: android-actions/setup-android@v3 is intentionally not used:
       # it unconditionally installs the obsolete `tools` package, which no
       # longer exists in current cmdline-tools (sdkmanager exits 1 with
@@ -73,6 +78,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # Same cache rationale as the android job: five cold legs resolving
+      # concurrently trip Maven Central rate limits.
+      - uses: gradle/actions/setup-gradle@v4
       # Same note as the android job: setup-android@v3 is broken
       # (obsolete `tools` package), so sdkmanager is used by full path.
       # Gradle Managed Devices auto-provisions the emulator system
@@ -80,8 +88,9 @@ jobs:
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
       # Diagnostic (temporary): GMD snapshot setup reports "x86_64
       # emulation currently requires hardware acceleration" on these
-      # runners. Record whether /dev/kvm exists before booting anything.
+      # runners even though /dev/kvm exists. Record the node, the
+      # runner user's groups, and kvm kernel modules before booting.
       - name: Check KVM availability
-        run: ls -la /dev/kvm 2>&1 || echo "NO /dev/kvm node"
+        run: ls -la /dev/kvm 2>&1 || echo "NO /dev/kvm node"; id; lsmod 2>/dev/null | grep -i kvm || echo "no kvm module visible"
       - run: chmod +x launcher/gradlew launcher/emulator/run-matrix.sh
       - run: launcher/emulator/run-matrix.sh ${{ matrix.api-level }}
